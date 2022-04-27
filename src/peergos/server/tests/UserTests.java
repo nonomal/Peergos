@@ -582,6 +582,29 @@ public abstract class UserTests {
     }
 
     @Test
+    public void appendToFile() {
+        String username = generateUsername();
+        String password = "test";
+        UserContext context = PeergosNetworkUtils.ensureSignedUp(username, password, network, crypto);
+        FileWrapper userRoot = context.getUserRoot().join();
+        FileWrapper userRootCopy = context.getUserRoot().join();
+
+        String filename = "file1.txt";
+        String contents = "Hello ";
+        byte[] data = contents.getBytes();
+        userRootCopy = userRoot.uploadFileJS(filename, new AsyncReader.ArrayBacked(data), 0,data.length, false, false,
+                userRoot.mirrorBatId(), network, crypto, l -> {}, context.getTransactionService()).join();
+        checkFileContents(data, context.getUserRoot().join().getDescendentByPath(filename, crypto.hasher, context.network).join().get(), context);
+
+        contents = "World!";
+        data = contents.getBytes();
+        userRootCopy = userRootCopy.appendFileJS(filename, new AsyncReader.ArrayBacked(data), 0,data.length, network, crypto, l -> {}).join();
+        checkFileContents("Hello World!".getBytes(), context.getUserRoot().join().getDescendentByPath(filename, crypto.hasher, context.network).join().get(), context);
+
+
+    }
+
+    @Test
     public void concurrentUploadSucceeds() {
         String username = generateUsername();
         String password = "test";
