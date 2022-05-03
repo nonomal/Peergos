@@ -52,7 +52,7 @@ public class HTTPCoreNode implements CoreNode {
             Serialize.serialize(username, dout);
             dout.flush();
 
-            CompletableFuture<byte[]> fut = poster.postUnzip(urlPrefix + Constants.CORE_URL + "getPublicKey", bout.toByteArray());
+            CompletableFuture<byte[]> fut = postUnzip(urlPrefix + Constants.CORE_URL + "getPublicKey", bout.toByteArray());
             return fut.thenApply(res -> {
                 DataInputStream din = new DataInputStream(new ByteArrayInputStream(res));
 
@@ -107,7 +107,7 @@ public class HTTPCoreNode implements CoreNode {
             Serialize.serialize(username, dout);
             dout.flush();
 
-            return poster.postUnzip(urlPrefix + Constants.CORE_URL + "getChain", bout.toByteArray()).thenApply(res -> {
+            return postUnzip(urlPrefix + Constants.CORE_URL + "getChain", bout.toByteArray()).thenApply(res -> {
                 CborObject cbor = CborObject.fromByteArray(res);
                 if (! (cbor instanceof CborObject.CborList))
                     throw new IllegalStateException("Invalid cbor for claim chain: " + cbor);
@@ -138,7 +138,7 @@ public class HTTPCoreNode implements CoreNode {
             Serialize.serialize(token, dout);
             dout.flush();
 
-            return poster.postUnzip(urlPrefix + Constants.CORE_URL + "signup", bout.toByteArray())
+            return postUnzip(urlPrefix + Constants.CORE_URL + "signup", bout.toByteArray())
                     .thenApply(res -> {
                         DataInputStream din = new DataInputStream(new ByteArrayInputStream(res));
                         try {
@@ -171,7 +171,7 @@ public class HTTPCoreNode implements CoreNode {
             Serialize.serialize(token, dout);
             dout.flush();
 
-            return poster.postUnzip(urlPrefix + Constants.CORE_URL + "updateChain", bout.toByteArray())
+            return postUnzip(urlPrefix + Constants.CORE_URL + "updateChain", bout.toByteArray())
                     .thenApply(res -> {
                         DataInputStream din = new DataInputStream(new ByteArrayInputStream(res));
                         try {
@@ -191,7 +191,7 @@ public class HTTPCoreNode implements CoreNode {
 
     @Override
     public CompletableFuture<List<String>> getUsernames(String prefix) {
-        return poster.postUnzip(urlPrefix + Constants.CORE_URL + "getUsernamesGzip/"+prefix, new byte[0])
+        return postUnzip(urlPrefix + Constants.CORE_URL + "getUsernamesGzip/"+prefix, new byte[0])
                 .thenApply(raw -> (List) JSONParser.parse(new String(raw)));
     }
 
@@ -213,7 +213,7 @@ public class HTTPCoreNode implements CoreNode {
                 Serialize.serialize(mirrorBat.get().serialize(), dout);
             dout.flush();
 
-            return poster.postUnzip(modifiedPrefix + Constants.CORE_URL + "migrateUser", bout.toByteArray(), -1)
+            return postUnzip(modifiedPrefix + Constants.CORE_URL + "migrateUser", bout.toByteArray(), -1)
                     .thenApply(res -> UserSnapshot.fromCbor(CborObject.fromByteArray(res)));
         } catch (IOException ioe) {
             LOG.log(Level.WARNING, ioe.getMessage(), ioe);
@@ -221,5 +221,12 @@ public class HTTPCoreNode implements CoreNode {
         }
     }
 
+    private CompletableFuture<byte[]> postUnzip(String url, byte[] payload) {
+        return RetryHelper.runWithRetry(() -> poster.postUnzip(url, payload, 15_000));
+    }
+
+    private CompletableFuture<byte[]> postUnzip(String url, byte[] payload, int timeoutMillis) {
+        return RetryHelper.runWithRetry(() -> poster.postUnzip(url, payload, timeoutMillis));
+    }
     @Override public void close() {}
 }
