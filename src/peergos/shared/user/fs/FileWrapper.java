@@ -684,7 +684,6 @@ public class FileWrapper {
 
 
     @JsMethod
-    //fixme this is not a good implementation!
     public CompletableFuture<FileWrapper> replaceFile(FileWrapper srcFile,
                                                         NetworkAccess network,
                                                         Crypto crypto,
