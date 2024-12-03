@@ -6,10 +6,11 @@ import peergos.shared.corenode.*;
 import peergos.shared.crypto.*;
 import peergos.shared.crypto.asymmetric.*;
 import peergos.shared.crypto.symmetric.*;
-import peergos.shared.io.ipfs.multibase.*;
+import peergos.shared.io.ipfs.bases.*;
 import peergos.shared.util.*;
 
 import java.util.*;
+import java.util.concurrent.*;
 
 public class IdentityLink implements Cborable {
 
@@ -151,11 +152,11 @@ public class IdentityLink implements Cborable {
         return new IdentityLink(usernameA, serviceA, usernameB, serviceB);
     }
 
-    public static IdentityLink decrypt(String encryptedPost, SymmetricKey key, PublicSigningKey identity) {
+    public static CompletableFuture<IdentityLink> decrypt(String encryptedPost, SymmetricKey key, PublicSigningKey identity) {
         CipherText parsed = CipherText.fromCbor(CborObject.fromByteArray(Base58.decode(encryptedPost.trim())));
         byte[] decrypted = parsed.decrypt(key, c -> ((CborObject.CborByteArray) c).value);
-        byte[] unsigned = identity.unsignMessage(decrypted);
-        return IdentityLink.fromCbor(CborObject.fromByteArray(unsigned));
+        return identity.unsignMessage(decrypted)
+                .thenApply(unsigned -> IdentityLink.fromCbor(CborObject.fromByteArray(unsigned)));
     }
 
     @Override

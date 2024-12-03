@@ -17,12 +17,15 @@ public class MimeTypes {
     final static int[] MP42 = new int[]{'m', 'p', '4', '2'};
     final static int[] M4V = new int[]{'M', '4', 'V', ' '};
     final static int[] AVIF = new int[]{'a', 'v', 'i', 'f'};
+    final static int[] HEIC = new int[]{'h', 'e', 'i', 'c'};
     final static int[] AVC1 = new int[]{'a', 'v', 'c', '1'};
     final static int[] M4A = new int[]{'M', '4', 'A', ' '};
     final static int[] QT = new int[]{'q', 't', ' ', ' '};
     final static int[] THREEGP = new int[]{'3', 'g', 'p'};
 
     final static int[] FLV = new int[]{'F', 'L', 'V'};
+    final static int[] FORM = new int[]{'F', 'O', 'R', 'M'};
+    final static int[] AIFF = new int[]{'A', 'I', 'F', 'F'};
     final static int[] AVI = new int[]{'A', 'V', 'I', ' '};
     final static int[] OGG = new int[]{'O', 'g', 'g', 'S', 0, 2};
     final static int[] WEBM = new int[]{'w', 'e', 'b', 'm'};
@@ -37,16 +40,24 @@ public class MimeTypes {
     final static int[] TIFF2 = new int[]{'M', 'M', 0, 0x2A};
     final static int[] PNG = new int[]{137, 'P', 'N', 'G', 13, 10, 26, 10};
     final static int[] WEBP = new int[]{'W', 'E', 'B', 'P'};
+    final static int[] JPEGXL = new int[]{0xff, 0x0a};
+    final static int[] JPEGXL2 = new int[]{0x00, 0x00, 0x00, 0x0C, 0x4A, 0x58, 0x4C, 0x20, 0x0D, 0x0A, 0x87, 0x0A};
 
     final static int[] PDF = new int[]{0x25, 'P', 'D', 'F'};
+    final static int[] PS = new int[]{'%', '!', 'P', 'S', '-', 'A', 'd', 'o', 'b', 'e', '-'};
     final static int[] ZIP = new int[]{'P', 'K', 3, 4};
+    final static int[] GZIP = new int[]{0x1f, 0x8b, 0x08};
+    final static int[] RAR = new int[]{'R', 'a', 'r', '!', 0x1a, 0x07};
     final static int[] WASM = new int[]{0, 'a', 's', 'm'};
 
     final static int[] ICS = new int[]{'B','E','G','I','N',':','V','C','A','L','E','N','D','A','R'};
     final static int[] VCF = new int[]{'B','E','G','I','N',':','V','C','A','R','D'};
     final static int[] XML = new int[]{'<','?','x','m','l'};
+    final static int[] SVG = new int[]{'<','s','v','g',' '};
     final static int[] WOFF = new int[]{'w','O','F','F'};
     final static int[] WOFF2 = new int[]{'w','O','F','2'};
+    final static int[] OTF = new int[]{'O','T','T', 'O'};
+    final static int[] TTF = new int[]{0, 1, 0, 0};
 
     // mimetypes for files that are cbor list(mimetype int, map(data)), mimetypes < 24 use a single byte
     public static final String PEERGOS_TODO = "application/vnd.peergos-todo";
@@ -67,7 +78,7 @@ public class MimeTypes {
 
     final static int HEADER_BYTES_TO_IDENTIFY_MIME_TYPE = 40;
 
-    public static final String calculateMimeType(byte[] start, String filename) {
+    public static String calculateMimeType(byte[] start, String filename) {
         if (equalArrays(start, BMP))
             return "image/bmp";
         if (equalArrays(start, GIF))
@@ -85,6 +96,8 @@ public class MimeTypes {
             return "image/x-icon";
         if (equalArrays(start, RIFF) && equalArrays(start, 8, WEBP))
             return "image/webp";
+        if (equalArrays(start, JPEGXL) || equalArrays(start, JPEGXL2))
+            return "image/jxl";
         // many browsers don't support tiff
         if (equalArrays(start, TIFF1))
             return "image/tiff";
@@ -102,6 +115,8 @@ public class MimeTypes {
                 return "video/m4v";
             if (equalArrays(start, 8, AVIF))
                 return "image/avif";
+            if (equalArrays(start, 8, HEIC))
+                return "image/heic";
             if (equalArrays(start, 8, M4A))
                 return "audio/mp4";
             if (equalArrays(start, 8, AVC1))
@@ -113,7 +128,7 @@ public class MimeTypes {
         }
         if (equalArrays(start, 24, WEBM))
             return "video/webm";
-        if (equalArrays(start, OGG))
+        if (equalArrays(start, OGG) && !filename.endsWith("oga"))
             return "video/ogg";
         if (equalArrays(start, MATROSKA_START))
             return "video/x-matroska";
@@ -136,9 +151,14 @@ public class MimeTypes {
             return "audio/ogg";
         if (equalArrays(start, RIFF) && equalArrays(start, 8, WAV_2))
             return "audio/wav";
+        if (equalArrays(start, FORM) && equalArrays(start, 8, AIFF))
+            return "audio/aiff";
 
         if (equalArrays(start, PDF))
             return "application/pdf";
+
+        if (equalArrays(start, PS))
+            return "application/postscript";
 
         if (equalArrays(start, WASM))
             return "application/wasm";
@@ -163,13 +183,26 @@ public class MimeTypes {
             if (filename.endsWith(".odp"))
                 return "application/vnd.oasis.opendocument.presentation";
 
+            if (filename.endsWith(".apk"))
+                return "application/vnd.android.package-archive";
+
             return "application/zip";
         }
+
+        if (equalArrays(start, GZIP))
+            return "application/x-gzip";
+
+        if (equalArrays(start, RAR))
+            return "application/x-rar-compressed";
 
         if (equalArrays(start, WOFF))
             return "font/woff";
         if (equalArrays(start, WOFF2))
             return "font/woff2";
+        if (equalArrays(start, OTF))
+            return "font/otf";
+        if (equalArrays(start, TTF))
+            return "font/ttf";
 
         if (equalArrays(start, CBOR_PEERGOS_TODO))
             return PEERGOS_TODO;
@@ -178,7 +211,7 @@ public class MimeTypes {
         if (equalArrays(start, CBOR_PEERGOS_IDENTITY_PROOF))
             return PEERGOS_IDENTITY;
 
-        if (allAscii(start)) {
+        if (validUtf8(start)) {
             if (filename.endsWith(".ics") && equalArrays(start, ICS))
                 return "text/calendar";
             if (filename.endsWith(".vcf") && equalArrays(start, VCF))
@@ -189,19 +222,67 @@ public class MimeTypes {
                 return "text/css";
             if (filename.endsWith(".js"))
                 return "text/javascript";
-            if (filename.endsWith(".svg") && equalArrays(start, XML))
+            if (filename.endsWith(".svg") && (equalArrays(start, XML) || equalArrays(start, SVG)))
                 return "image/svg+xml";
+            if (filename.endsWith(".json"))
+                return "application/json";
+            try {
+                String prefix = new String(start).trim().toLowerCase();
+                if (prefix.contains("html>") || prefix.contains("<html"))
+                    return "text/html";
+            } catch (Exception e) {
+                // invalid utf8
+            }
             return "text/plain";
         }
         return "application/octet-stream";
     }
 
-    private static boolean allAscii(byte[] data) {
-        for (byte b : data) {
-            if ((b & 0xff) > 0x80)
+    private static boolean isContinuationByte(byte b) {
+        return (b & 0xc0) == 0x80;
+    }
+
+    private static boolean validUtf8(byte[] data) {
+        // UTF-8 is 1-4 bytes, 1 byte chars are ascii
+        // number of leading 1 bits in first byte determine number of bytes
+        for (int i=0; i < data.length; i++) {
+            byte b = data[i];
+            if ((b & 0xff) < 0x80)
+                continue; // ASCII
+
+            // check rest of character
+            int len = Integer.numberOfLeadingZeros(~b << 24);
+            if (len > 4 || len < 2) // can't start with a continuation byte
                 return false;
-            if ((b & 0xff) < 0x20 && b != (byte)0x9 && b != (byte)0xA && b != (byte) 0xD)
+            if (i + len > data.length) {
+                for (int x = i + 1; x < data.length; x++)
+                    if (! isContinuationByte(data[x]))
+                        return false;
+                return true; // tolerate partial final chars as this is a prefix
+            }
+            for (int x = 1; x < len; x++)
+                if (! isContinuationByte(data[i + x]))
+                    return false;
+            int val;
+            if (len == 2) {
+                val = ((b & 0x1f) << 6) | (data[i + 1] & 0x3f);
+                if (val <= 0x7f)
+                    return false;
+            } else if (len == 3) {
+                val = ((b & 0xf) << 12) | ((data[i + 1] & 0x3f) << 6) | (data[i + 2] & 0x3f);
+                if (val <= 0x7ff)
+                    return false;
+            } else { // len == 4
+                val = ((b & 0x7) << 18) | ((data[i + 1] & 0x3f) << 12) | ((data[i + 2] & 0x3f) << 6) | (data[i + 3] & 0x3f);
+                if (val <= 0xffff)
+                    return false;
+            }
+
+            if (val > 0x10ffff)
                 return false;
+            if (val > 0xd800 && val <= 0xdfff)
+                return false;
+            i += len-1;
         }
         return true;
     }

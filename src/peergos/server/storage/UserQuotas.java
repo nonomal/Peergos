@@ -8,8 +8,9 @@ import peergos.shared.cbor.*;
 import peergos.shared.corenode.*;
 import peergos.shared.crypto.asymmetric.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.*;
+import peergos.shared.storage.controller.*;
 import peergos.shared.util.*;
 
 import java.io.*;
@@ -28,19 +29,22 @@ public class UserQuotas implements QuotaAdmin {
     private final JdbcSpaceRequests spaceRequests;
     private final ContentAddressedStorage dht;
     private final CoreNode core;
+    private final boolean isPki;
 
     public UserQuotas(JdbcQuotas quotas,
                       long defaultQuota,
                       long maxUsers,
                       JdbcSpaceRequests spaceRequests,
                       ContentAddressedStorage dht,
-                      CoreNode core) {
+                      CoreNode core,
+                      boolean isPki) {
         this.quotas = quotas;
         this.defaultQuota = defaultQuota;
         this.maxUsers = maxUsers;
         this.spaceRequests = spaceRequests;
         this.dht = dht;
         this.core = core;
+        this.isPki = isPki;
     }
 
     @Override
@@ -56,19 +60,21 @@ public class UserQuotas implements QuotaAdmin {
     }
 
     @Override
-    public CompletableFuture<Boolean> requestQuota(PublicKeyHash owner, byte[] signedRequest) {
+    public CompletableFuture<PaymentProperties> requestQuota(PublicKeyHash owner, byte[] signedRequest, long usage) {
         SpaceUsage.SpaceRequest req = QuotaAdmin.parseQuotaRequest(owner, signedRequest, dht);
         // TODO check user is signed up to this server
-        return Futures.of(spaceRequests.addSpaceRequest(req.username, signedRequest));
+        boolean added = spaceRequests.addSpaceRequest(req.username, signedRequest);
+        String username = core.getUsername(owner).join();
+        return Futures.of(new PaymentProperties(getQuota(username)));
     }
 
     @Override
     public void approveSpaceRequest(PublicKeyHash adminIdentity, Multihash instanceIdentity, byte[] signedRequest) {
         try {
-            Optional<PublicSigningKey> adminOpt = dht.getSigningKey(adminIdentity).join();
+            Optional<PublicSigningKey> adminOpt = dht.getSigningKey(adminIdentity, adminIdentity).join();
             if (!adminOpt.isPresent())
                 throw new IllegalStateException("Couldn't retrieve admin key!");
-            byte[] rawFromAdmin = adminOpt.get().unsignMessage(signedRequest);
+            byte[] rawFromAdmin = adminOpt.get().unsignMessage(signedRequest).join();
             SpaceUsage.LabelledSignedSpaceRequest withName = QuotaControl.LabelledSignedSpaceRequest
                     .fromCbor(CborObject.fromByteArray(rawFromAdmin));
 
@@ -76,11 +82,11 @@ public class UserQuotas implements QuotaAdmin {
             if (! userOpt.isPresent())
                 throw new IllegalStateException("Couldn't lookup user key!");
 
-            Optional<PublicSigningKey> userKey = dht.getSigningKey(userOpt.get()).join();
+            Optional<PublicSigningKey> userKey = dht.getSigningKey(userOpt.get(), userOpt.get()).join();
             if (! userKey.isPresent())
                 throw new IllegalStateException("Couldn't retrieve user key!");
 
-            CborObject cbor = CborObject.fromByteArray(userKey.get().unsignMessage(withName.signedRequest));
+            CborObject cbor = CborObject.fromByteArray(userKey.get().unsignMessage(withName.signedRequest).join());
             SpaceUsage.SpaceRequest req = QuotaControl.SpaceRequest.fromCbor(cbor);
             setQuota(req.username, req.bytes);
             removeSpaceRequest(req.username, withName.signedRequest);
@@ -95,8 +101,8 @@ public class UserQuotas implements QuotaAdmin {
     }
 
     @Override
-    public boolean acceptingSignups() {
-        return quotas.numberOfUsers() < maxUsers;
+    public AllowedSignups acceptingSignups() {
+        return new AllowedSignups(quotas.numberOfUsers() < maxUsers, false);
     }
 
     @Override
@@ -115,6 +121,16 @@ public class UserQuotas implements QuotaAdmin {
         quotas.setQuota(username, defaultQuota);
         return true;
     }
+
+    @Override
+    public PaymentProperties createPaidUser(String username) {
+        if (isPki)
+            return new PaymentProperties(0);
+        throw new IllegalStateException("Cannot create a paid user on an unpaid server!");
+    }
+
+    @Override
+    public void removeDesiredQuota(String username) {}
 
     @Override
     public boolean consumeToken(String username, String token) {

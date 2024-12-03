@@ -4,8 +4,8 @@ import peergos.shared.cbor.*;
 import peergos.shared.crypto.*;
 import peergos.shared.crypto.hash.*;
 import peergos.shared.hamt.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.*;
 import peergos.shared.util.*;
 
@@ -33,11 +33,12 @@ public class OwnedKeyChamp {
         Champ<CborObject.CborMerkleLink> newRoot = Champ.empty(c -> (CborObject.CborMerkleLink)c);
         byte[] raw = newRoot.serialize();
         return hasher.sha256(raw)
-                .thenCompose(hash -> ipfs.put(owner, writer.publicKeyHash, writer.secret.signMessage(hash), raw, tid));
+                .thenCompose(writer.secret::signMessage)
+                .thenCompose(signed -> ipfs.put(owner, writer.publicKeyHash, signed, raw, tid));
     }
 
-    public static CompletableFuture<OwnedKeyChamp> build(Cid root, ContentAddressedStorage ipfs, Hasher hasher) {
-        return ChampWrapper.create(root, b -> Futures.of(b.data), ipfs, hasher, c -> (CborObject.CborMerkleLink)c)
+    public static CompletableFuture<OwnedKeyChamp> build(PublicKeyHash owner, Cid root, ContentAddressedStorage ipfs, Hasher hasher) {
+        return ChampWrapper.create(owner, root, Optional.empty(), b -> Futures.of(b.data), ipfs, hasher, c -> (CborObject.CborMerkleLink)c)
                 .thenApply(c -> new OwnedKeyChamp(root, c, ipfs));
     }
 
@@ -52,10 +53,11 @@ public class OwnedKeyChamp {
         return reverse(key.serialize());
     }
 
-    public CompletableFuture<Optional<OwnerProof>> get(PublicKeyHash ownedKey) {
+    public CompletableFuture<Optional<OwnerProof>> get(PublicKeyHash owner,
+                                                       PublicKeyHash ownedKey) {
         return champ.get(keyToBytes(ownedKey))
                 .thenCompose(res -> res.isPresent() ?
-                        ipfs.get((Cid)res.get().target, Optional.empty()).thenApply(raw -> raw.map(OwnerProof::fromCbor)) :
+                        ipfs.get(owner, (Cid)res.get().target, Optional.empty()).thenApply(raw -> raw.map(OwnerProof::fromCbor)) :
                         CompletableFuture.completedFuture(Optional.empty()));
     }
 
@@ -66,7 +68,7 @@ public class OwnedKeyChamp {
                                             TransactionId tid) {
         return ipfs.put(owner, writer, proof.serialize(), hasher, tid)
                 .thenCompose(valueHash ->
-                        champ.put(owner, writer, keyToBytes(proof.ownedKey), Optional.empty(), new CborObject.CborMerkleLink(valueHash), tid));
+                        champ.put(owner, writer, keyToBytes(proof.ownedKey), Optional.empty(), new CborObject.CborMerkleLink(valueHash), Optional.empty(), tid));
     }
 
     public CompletableFuture<Multihash> remove(PublicKeyHash owner,
@@ -75,7 +77,9 @@ public class OwnedKeyChamp {
                                                TransactionId tid) {
         byte[] keyBytes = keyToBytes(key);
         return champ.get(keyBytes)
-                .thenCompose(existing -> champ.remove(owner, writer, keyBytes, existing, tid));
+                .thenCompose(existing -> existing.isPresent() ?
+                        champ.remove(owner, writer, keyBytes, existing, Optional.empty(), tid) :
+                        Futures.of(champ.getRoot()));
     }
 
     public CompletableFuture<Boolean> contains(PublicKeyHash ownedKey) {
@@ -83,12 +87,13 @@ public class OwnedKeyChamp {
                 .thenApply(Optional::isPresent);
     }
 
-    public <T> CompletableFuture<T> applyToAllMappings(T identity,
+    public <T> CompletableFuture<T> applyToAllMappings(PublicKeyHash owner,
+                                                       T identity,
                                                        BiFunction<T, Pair<PublicKeyHash, OwnerProof>, CompletableFuture<T>> consumer,
                                                        ContentAddressedStorage ipfs) {
-        return champ.reduceAllMappings(identity,
+        return champ.reduceAllMappings(owner, identity,
                 (acc, pair) -> ! pair.right.isPresent() ? CompletableFuture.completedFuture(acc) :
-                        ipfs.get((Cid)pair.right.get().target, Optional.empty())
+                        ipfs.get(owner, (Cid)pair.right.get().target, Optional.empty())
                                 .thenApply(raw -> OwnerProof.fromCbor(raw.get()))
                                 .thenCompose(proof -> consumer.apply(acc,
                                         new Pair<>(PublicKeyHash.fromCbor(CborObject.fromByteArray(reverse(pair.left.data))), proof))));

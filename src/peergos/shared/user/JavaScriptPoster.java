@@ -16,7 +16,7 @@ public class JavaScriptPoster implements HttpPoster {
     }
 
     private String canonicalise(String url) {
-        if (isAbsolute && ! url.startsWith("/"))
+        if (isAbsolute && ! url.startsWith("/") && ! url.startsWith("https://") && ! url.startsWith("http://"))
             return "/" + url;
         return url;
     }
@@ -27,13 +27,23 @@ public class JavaScriptPoster implements HttpPoster {
     }
 
     @Override
+    public CompletableFuture<byte[]> post(String url, byte[] payload, boolean unzip) {
+        return post(url, payload, unzip, 30_000);
+    }
+
+    @Override
     public CompletableFuture<byte[]> postUnzip(String url, byte[] payload, int timeoutMillis) {
         return post(canonicalise(url), payload, true, timeoutMillis);
     }
 
     @Override
-    public CompletableFuture<byte[]> postMultipart(String url, List<byte[]> files) {
-        return http.postMultipart(canonicalise(url), files);
+    public CompletableFuture<byte[]> postUnzip(String url, byte[] payload) {
+        return postUnzip(url, payload, 30_000);
+    }
+    
+    @Override
+    public CompletableFuture<byte[]> postMultipart(String url, List<byte[]> files, int timeoutMillis) {
+        return http.postMultipart(canonicalise(url), files,  timeoutMillis);
     }
 
     @Override
@@ -54,14 +64,14 @@ public class JavaScriptPoster implements HttpPoster {
 
     @Override
     public CompletableFuture<byte[]> get(String url, Map<String, String> headers) {
-        if (isAbsolute || useGet) {// Still do a get if we are served from an IPFS gateway
+        if (useGet) {
             String[] headersArray = new String[headers.size() * 2];
             int index = 0;
             for (Map.Entry<String, String> e : headers.entrySet()) {
                 headersArray[index++] = e.getKey();
                 headersArray[index++] = e.getValue();
             }
-            return http.getWithHeaders(url, headersArray);
+            return http.getWithHeaders(canonicalise(url), headersArray);
         }
         return postUnzip(url, new byte[0]);
     }

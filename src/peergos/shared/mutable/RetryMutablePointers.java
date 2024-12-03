@@ -1,7 +1,9 @@
 package peergos.shared.mutable;
 
 import peergos.shared.crypto.hash.*;
+import peergos.shared.storage.CasException;
 
+import java.net.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.*;
@@ -36,6 +38,10 @@ public class RetryMutablePointers implements MutablePointers {
                     .thenAccept(res::complete)
                     .exceptionally(e -> {
                         if (retriesLeft == 1) {
+                            res.completeExceptionally(e);
+                        } else if (e instanceof ConnectException) {
+                            res.completeExceptionally(e);
+                        } else if (e instanceof CasException) {
                             res.completeExceptionally(e);
                         } else {
                             retryAfter(() -> recurse(retriesLeft - 1, f)

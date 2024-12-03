@@ -1,8 +1,13 @@
 package peergos.client;
 
 import jsinterop.annotations.*;
+import peergos.shared.cbor.CborObject;
+import peergos.shared.login.mfa.MultiFactorAuthResponse;
+import peergos.shared.login.mfa.WebauthnResponse;
+import peergos.shared.util.Either;
 
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -10,6 +15,16 @@ import java.util.stream.Collectors;
  *
  */
 public class JsUtil {
+
+    @JsMethod
+    public static LocalDateTime fromUtcMillis(long millis) {
+        return LocalDateTime.ofEpochSecond(millis/1_000, ((int)(millis % 1000)) * 1_000_000, ZoneOffset.UTC);
+    }
+
+    @JsMethod
+    public static CborObject fromByteArray(byte[] cbor) {
+        return CborObject.fromByteArray(cbor);
+    }
 
     @JsMethod
     public static <T> List<T> asList(T[] array) {
@@ -41,4 +56,17 @@ public class JsUtil {
     public static LocalDateTime now() {
         return LocalDateTime.now();
     }
+
+    @JsMethod
+    public static MultiFactorAuthResponse generateAuthResponse(byte[] credentialId, String code) {
+        return new MultiFactorAuthResponse(credentialId, Either.a(code));
+    }
+
+    @JsMethod
+    public static MultiFactorAuthResponse generateWebAuthnResponse(byte[] credentialId, byte[] authenticatorData,
+                                                                   byte[] clientDataJson, byte[] signature) {
+        WebauthnResponse resp = new WebauthnResponse(authenticatorData, clientDataJson, signature);
+        return new MultiFactorAuthResponse(credentialId, Either.b(resp));
+    }
+
 }

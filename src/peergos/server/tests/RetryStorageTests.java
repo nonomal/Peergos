@@ -3,17 +3,17 @@ package peergos.server.tests;
 import org.junit.Assert;
 import org.junit.Test;
 import peergos.server.*;
-import peergos.server.storage.RAMStorage;
+import peergos.server.storage.*;
 import peergos.shared.cbor.CborObject;
 import peergos.shared.crypto.hash.PublicKeyHash;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.Multihash;
-import peergos.shared.storage.BlockStoreProperties;
-import peergos.shared.storage.ContentAddressedStorage;
-import peergos.shared.storage.RetryStorage;
-import peergos.shared.storage.TransactionId;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
+import peergos.shared.storage.*;
 import peergos.shared.storage.auth.*;
+import peergos.shared.user.fs.*;
 import peergos.shared.util.ProgressConsumer;
+
+import java.time.*;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 
@@ -38,6 +38,16 @@ public class RetryStorageTests {
             }else{
                 counter=1;
                 return CompletableFuture.completedFuture(new Cid(1, Cid.Codec.LibP2pKey, Multihash.Type.sha2_256, new byte[32]));
+            }
+        }
+
+        @Override
+        public CompletableFuture<List<Cid>> ids() {
+            if(counter++ % retryLimit != 0) {
+                return CompletableFuture.failedFuture(new Error("failure!"));
+            }else{
+                counter=1;
+                return CompletableFuture.completedFuture(List.of(new Cid(1, Cid.Codec.LibP2pKey, Multihash.Type.sha2_256, new byte[32])));
             }
         }
 
@@ -91,7 +101,7 @@ public class RetryStorageTests {
 
 
         @Override
-        public CompletableFuture<Optional<byte[]>> getRaw(Cid object, Optional<BatWithId> bat) {
+        public CompletableFuture<Optional<byte[]>> getRaw(PublicKeyHash owner, Cid object, Optional<BatWithId> bat) {
             if(counter++ % retryLimit != 0) {
                 return CompletableFuture.failedFuture(new Error("failure!"));
             }else {
@@ -101,7 +111,7 @@ public class RetryStorageTests {
         }
 
         @Override
-        public CompletableFuture<Optional<CborObject>> get(Cid hash, Optional<BatWithId> bat) {
+        public CompletableFuture<Optional<CborObject>> get(PublicKeyHash owner, Cid hash, Optional<BatWithId> bat) {
             if(counter++ % retryLimit != 0) {
                 return CompletableFuture.failedFuture(new Error("failure!"));
             }else {
@@ -111,13 +121,23 @@ public class RetryStorageTests {
         }
 
         @Override
-        public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat) {
+        public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat, Optional<Cid> committedRoot) {
             if(counter++ % retryLimit != 0) {
                 return CompletableFuture.failedFuture(new Error("failure!"));
             }else {
                 counter=1;
                 return CompletableFuture.completedFuture(Collections.emptyList());
             }
+        }
+
+        @Override
+        public CompletableFuture<EncryptedCapability> getSecretLink(SecretLink link) {
+            throw new IllegalStateException("Unimplemented!");
+        }
+
+        @Override
+        public CompletableFuture<LinkCounts> getLinkCounts(String owner, LocalDateTime after, BatWithId mirrorBat) {
+            throw new IllegalStateException("Unimplemented!");
         }
 
         @Override
@@ -128,6 +148,11 @@ public class RetryStorageTests {
                 counter=1;
                 return CompletableFuture.completedFuture(Optional.empty());
             }
+        }
+
+        @Override
+        public CompletableFuture<IpnsEntry> getIpnsEntry(Multihash signer) {
+            throw new IllegalStateException("Unimplemented!");
         }
     }
 

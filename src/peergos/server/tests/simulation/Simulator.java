@@ -749,7 +749,7 @@ public class Simulator {
                 .with("pki.keygen.password", "testpkipassword")
                 .with("pki.keyfile.password", "testpassword")
                 .with(IpfsWrapper.IPFS_BOOTSTRAP_NODES, ""); // no bootstrapping
-        UserService service = Main.PKI_INIT.main(args);
+        UserService service = Main.PKI_INIT.main(args).localApi;
         LOG.info("***NETWORK READY***");
 
         Function<String, Pair<FileSystem, FileSystem>> fsPairBuilder = username -> {
@@ -757,7 +757,7 @@ public class Simulator {
                 WriteSynchronizer synchronizer = new WriteSynchronizer(service.mutable, service.storage, crypto.hasher);
                 MutableTree mutableTree = new MutableTreeImpl(service.mutable, service.storage, crypto.hasher, synchronizer);
                 NetworkAccess networkAccess = new NetworkAccess(service.coreNode, service.account, service.social, service.storage,
-                        service.bats, service.mutable, mutableTree, synchronizer, service.controller, service.usage,
+                        service.bats, Optional.empty(), service.mutable, mutableTree, synchronizer, service.controller, service.usage,
                         service.serverMessages, service.crypto.hasher, Arrays.asList("peergos"), false);
                 UserContext userContext = PeergosNetworkUtils.ensureSignedUp(username, usernameToPassword(username), networkAccess, crypto);
                 PeergosFileSystemImpl peergosFileSystem = new PeergosFileSystemImpl(userContext);

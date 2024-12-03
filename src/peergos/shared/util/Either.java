@@ -1,8 +1,11 @@
 package peergos.shared.util;
 
+import jsinterop.annotations.JsType;
+
 import java.util.*;
 import java.util.function.*;
 
+@JsType
 public class Either<A, B> {
     private final A a;
     private final B b;
@@ -58,5 +61,10 @@ public class Either<A, B> {
 
     public static <A, B> Either<A, B> b(B b) {
         return new Either<>(null, b);
+    }
+
+    @Override
+    public String toString() {
+        return isA() ? a.toString() : b.toString();
     }
 }

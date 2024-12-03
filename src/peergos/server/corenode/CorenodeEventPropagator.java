@@ -3,12 +3,14 @@ package peergos.server.corenode;
 import peergos.shared.corenode.*;
 import peergos.shared.crypto.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Multihash;
+import peergos.shared.storage.*;
 import peergos.shared.storage.auth.*;
 import peergos.shared.user.*;
 import peergos.shared.util.*;
 
 import java.io.*;
+import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.*;
@@ -42,6 +44,27 @@ public class CorenodeEventPropagator implements CoreNode {
                     }
                     return res;
                 });
+    }
+
+    @Override
+    public CompletableFuture<Either<PaymentProperties, RequiredDifficulty>> startPaidSignup(String username,
+                                                                                            UserPublicKeyLink chain,
+                                                                                            ProofOfWork proof) {
+        return target.startPaidSignup(username, chain, proof);
+    }
+
+    @Override
+    public CompletableFuture<PaymentProperties> completePaidSignup(String username,
+                                                                   UserPublicKeyLink chain,
+                                                                   OpLog setupOperations,
+                                                                   byte[] signedSpaceRequest,
+                                                                   ProofOfWork proof) {
+        return target.completePaidSignup(username, chain, setupOperations, signedSpaceRequest, proof)
+                .thenApply(res -> {
+                    processEvent(Arrays.asList(chain)).join();
+                    return res;
+                });
+
     }
 
     @Override
@@ -87,11 +110,18 @@ public class CorenodeEventPropagator implements CoreNode {
     public CompletableFuture<UserSnapshot> migrateUser(String username,
                                                        List<UserPublicKeyLink> newChain,
                                                        Multihash currentStorageId,
-                                                       Optional<BatWithId> mirrorBat) {
-        return target.migrateUser(username, newChain, currentStorageId, mirrorBat).thenApply(res -> {
+                                                       Optional<BatWithId> mirrorBat,
+                                                       LocalDateTime latestLinkCountUpdate,
+                                                       long currentUsage) {
+        return target.migrateUser(username, newChain, currentStorageId, mirrorBat, latestLinkCountUpdate, currentUsage).thenApply(res -> {
             processEvent(newChain);
             return res;
         });
+    }
+
+    @Override
+    public CompletableFuture<Optional<Multihash>> getNextServerId(Multihash serverId) {
+        return target.getNextServerId(serverId);
     }
 
     @Override

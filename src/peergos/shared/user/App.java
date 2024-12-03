@@ -2,8 +2,8 @@ package peergos.shared.user;
 
 import jsinterop.annotations.JsMethod;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.multibase.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Multihash;
+import peergos.shared.io.ipfs.bases.*;
 import peergos.shared.user.app.*;
 import peergos.shared.user.fs.AsyncReader;
 import peergos.shared.user.fs.FileWrapper;
@@ -68,7 +68,7 @@ public class App implements StoreAppData {
         App app = new App(ctx, appDataDir);
         return ctx.username == null ? Futures.of(app) :
                 ctx.getUserRoot()
-                .thenCompose(root -> root.getOrMkdirs(appDataDir, ctx.network, true, root.mirrorBatId(), ctx.crypto))
+                .thenCompose(root -> root.getOrMkdirs(appDataDir, ctx.network, true, ctx.mirrorBatId(), ctx.crypto))
                 .thenApply(appDir -> app);
     }
 
@@ -100,7 +100,7 @@ public class App implements StoreAppData {
 
     private CompletableFuture<Boolean> appendFileContents(Path path, byte[] data) {
         Path pathWithoutUsername = path.subpath(1, path.getNameCount());
-        return ctx.getByPath(ctx.username).thenCompose(userRoot -> userRoot.get().getOrMkdirs(pathWithoutUsername.getParent(), ctx.network, true, userRoot.get().mirrorBatId(), ctx.crypto)
+        return ctx.getByPath(ctx.username).thenCompose(userRoot -> userRoot.get().getOrMkdirs(pathWithoutUsername.getParent(), ctx.network, false, ctx.mirrorBatId(), ctx.crypto)
                 .thenCompose(dir -> dir.appendFileJS(path.getFileName().toString(), AsyncReader.build(data),
                                 0,data.length, ctx.network, ctx.crypto, x -> {})
                         .thenApply(fw -> true)
@@ -109,7 +109,7 @@ public class App implements StoreAppData {
 
     private CompletableFuture<Boolean> writeFileContents(Path path, byte[] data) {
         Path pathWithoutUsername = path.subpath(1, path.getNameCount());
-        return ctx.getByPath(ctx.username).thenCompose(userRoot -> userRoot.get().getOrMkdirs(pathWithoutUsername.getParent(), ctx.network, true, userRoot.get().mirrorBatId(), ctx.crypto)
+        return ctx.getByPath(ctx.username).thenCompose(userRoot -> userRoot.get().getOrMkdirs(pathWithoutUsername.getParent(), ctx.network, false, ctx.mirrorBatId(), ctx.crypto)
                 .thenCompose(dir -> dir.uploadOrReplaceFile(path.getFileName().toString(), AsyncReader.build(data),
                         data.length, ctx.network, ctx.crypto, x -> {})
                         .thenApply(fw -> true)
@@ -127,7 +127,7 @@ public class App implements StoreAppData {
                 throw new IllegalStateException("File not found:" + path.toString());
             }
             long len = optFile.get().getSize();
-            return optFile.get().getInputStream(ctx.network, ctx.crypto, len, l-> {})
+            return optFile.get().getInputStream(ctx.network, ctx.crypto, len, 1, l-> {})
                     .thenCompose(is -> Serialize.readFully(is, len)
                             .thenApply(bytes -> bytes));
         });
@@ -187,7 +187,7 @@ public class App implements StoreAppData {
     public CompletableFuture<Boolean> createDirectoryInternal(Path relativePath, String username) {
         Path base = PathUtil.get(username == null ? ctx.username : username).resolve(appDataDirectoryWithoutUser);
         return ctx.getByPath(base)
-                .thenCompose(baseOpt -> baseOpt.get().getOrMkdirs(normalisePath(relativePath), ctx.network, false, baseOpt.get().mirrorBatId(), ctx.crypto)
+                .thenCompose(baseOpt -> baseOpt.get().getOrMkdirs(normalisePath(relativePath), ctx.network, false, ctx.mirrorBatId(), ctx.crypto)
                 .thenApply(fw -> true));
     }
     /*

@@ -10,7 +10,7 @@ import peergos.shared.*;
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.mutable.*;
 import peergos.shared.storage.*;
 import peergos.shared.util.*;
@@ -39,12 +39,13 @@ public class GCBenchmark {
             TransactionId tid = storage.startTransaction(owner).join();
             Multihash root = generateTree(r, owner, storage, nLeavesPerUser, tid);
             PointerUpdate cas = new PointerUpdate(MaybeMultihash.empty(), MaybeMultihash.of(root), Optional.of(Long.valueOf(i)));
-            pointers.setPointer(owner, Optional.empty(), pair.signMessage(cas.serialize())).join();
+            pointers.setPointer(owner, Optional.empty(), pair.signMessage(cas.serialize()).join()).join();
             generateTree(r, owner, storage, nLeavesPerUser/2, tid); // garbage tree
             storage.closeTransaction(owner, tid).join();
         }
 
-        GarbageCollector.collect(storage, pointers, usage, s -> Futures.of(true));
+        GarbageCollector.collect(storage, pointers, usage, Paths.get("reachability.sql"), s -> Futures.of(true),
+                new RamBlockMetadataStore(), (d, c) -> Futures.of(true), false);
     }
 
     private static Multihash generateTree(Random r, PublicKeyHash owner, ContentAddressedStorage storage, int nLeaves, TransactionId tid) {

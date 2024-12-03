@@ -9,8 +9,8 @@ import peergos.shared.*;
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.*;
 import peergos.shared.hamt.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.util.*;
 
 import java.util.*;
@@ -53,7 +53,7 @@ public class EfficiencyComparison {
 
                 for (Map.Entry<ByteArrayWrapper, Optional<CborObject.CborMerkleLink>> e : state.entrySet()) {
                     current = current.left.put(champUser.publicKeyHash, champUser, e.getKey(), e.getKey().data, 0, Optional.empty(),
-                            e.getValue(), bitWidth, maxCollisions, x -> Futures.of(x.data),
+                            e.getValue(), bitWidth, maxCollisions, Optional.empty(), x -> Futures.of(x.data),
                             champStorage.startTransaction(champUser.publicKeyHash).get(), champStorage, crypto.hasher,
                             current.right).get();
                 }

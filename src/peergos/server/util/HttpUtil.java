@@ -8,6 +8,7 @@ import java.io.*;
 import java.net.*;
 import java.util.*;
 import java.util.logging.*;
+import java.util.stream.*;
 
 public class HttpUtil {
 
@@ -68,6 +69,10 @@ public class HttpUtil {
     }
 
     public static byte[] get(PresignedUrl url) throws IOException {
+        return getWithVersion(url).left;
+    }
+
+    public static Pair<byte[], String> getWithVersion(PresignedUrl url) throws IOException {
         try {
             HttpURLConnection conn = (HttpURLConnection) new URI(url.base).toURL().openConnection();
             conn.setConnectTimeout(10_000);
@@ -78,8 +83,18 @@ public class HttpUtil {
             }
 
             try {
+                int respCode = conn.getResponseCode();
+                if (respCode == 502 || respCode == 503)
+                    throw new RateLimitException();
+                if (respCode == 404)
+                    throw new FileNotFoundException();
                 InputStream in = conn.getInputStream();
-                return Serialize.readFully(in);
+                Map<String, String> headers = conn.getHeaderFields().entrySet()
+                        .stream()
+                        .filter(e -> e.getKey() != null)
+                        .collect(Collectors.toMap(e -> e.getKey().toLowerCase(), e -> e.getValue().get(0)));
+                String version = headers.getOrDefault("x-amz-version-id", null);
+                return new Pair<>(Serialize.readFully(in), version);
             } catch (IOException e) {
                 InputStream err = conn.getErrorStream();
                 if (err == null)
@@ -104,7 +119,7 @@ public class HttpUtil {
                 int respCode = conn.getResponseCode();
                 if (respCode == 200)
                     return conn.getHeaderFields();
-                if (respCode == 503)
+                if (respCode == 502 || respCode == 503)
                     throw new RateLimitException();
                 if (respCode == 404)
                     throw new FileNotFoundException();
@@ -121,15 +136,15 @@ public class HttpUtil {
         }
     }
 
-    public static byte[] put(PresignedUrl target, byte[] body) throws IOException {
-        return putOrPost("PUT", target, body);
+    public static Pair<byte[], String> putWithVersion(PresignedUrl target, byte[] body) throws IOException {
+        return putOrPostWithVersion("PUT", target, body);
     }
 
     public static byte[] post(PresignedUrl target, byte[] body) throws IOException {
-        return putOrPost("POST", target, body);
+        return putOrPostWithVersion("POST", target, body).left;
     }
 
-    private static byte[] putOrPost(String method, PresignedUrl target, byte[] body) throws IOException {
+    private static Pair<byte[], String> putOrPostWithVersion(String method, PresignedUrl target, byte[] body) throws IOException {
         HttpURLConnection conn = null;
         try {
             conn = (HttpURLConnection) new URI(target.base).toURL().openConnection();
@@ -143,13 +158,25 @@ public class HttpUtil {
             out.flush();
             out.close();
 
+            int httpCode = conn.getResponseCode();
+            if (httpCode == 502 || httpCode == 503)
+                throw new RateLimitException();
             InputStream in = conn.getInputStream();
-            return Serialize.readFully(in);
+            Map<String, String> headers = conn.getHeaderFields().entrySet()
+                    .stream()
+                    .filter(e -> e.getKey() != null)
+                    .collect(Collectors.toMap(e -> e.getKey().toLowerCase(), e -> e.getValue().get(0)));
+            String version = headers.getOrDefault("x-amz-version-id", null);
+            return new Pair(Serialize.readFully(in), version);
+        } catch (ConnectException e) {
+            throw new RateLimitException();
         } catch (IOException e) {
             if (conn != null) {
                 InputStream err = conn.getErrorStream();
-                byte[] errBody = Serialize.readFully(err);
-                throw new IOException(new String(errBody));
+                if (err != null) {
+                    byte[] errBody = Serialize.readFully(err);
+                    throw new IOException(new String(errBody));
+                }
             }
             throw new RuntimeException(e);
         } catch (URISyntaxException e) {
@@ -168,6 +195,8 @@ public class HttpUtil {
             int code = conn.getResponseCode();
             if (code == 204)
                 return;
+            if (code == 502 || code == 503)
+                throw new RateLimitException();
             InputStream in = conn.getInputStream();
             byte[] body = Serialize.readFully(in);
             throw new IllegalStateException("HTTP " + code + "-" + body);

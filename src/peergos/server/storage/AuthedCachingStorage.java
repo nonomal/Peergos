@@ -3,8 +3,8 @@ package peergos.server.storage;
 import peergos.server.storage.auth.*;
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.*;
 import peergos.shared.storage.auth.*;
 import peergos.shared.util.*;
@@ -14,10 +14,10 @@ import java.util.concurrent.*;
 
 public class AuthedCachingStorage extends DelegatingStorage {
     private final ContentAddressedStorage target;
-    private final LRUCache<Multihash, byte[]> cache;
-    private final LRUCache<Multihash, Boolean> legacyBlocks;
-    private final LRUCache<Multihash, CompletableFuture<Optional<CborObject>>> pending;
-    private final LRUCache<Multihash, CompletableFuture<Optional<byte[]>>> pendingRaw;
+    private final Map<Multihash, byte[]> cache;
+    private final Map<Multihash, Boolean> legacyBlocks;
+    private final Map<Multihash, CompletableFuture<Optional<CborObject>>> pending;
+    private final Map<Multihash, CompletableFuture<Optional<byte[]>>> pendingRaw;
     private final BlockRequestAuthoriser authoriser;
     private final Hasher h;
     private final Cid ourNodeId;
@@ -33,12 +33,12 @@ public class AuthedCachingStorage extends DelegatingStorage {
         this.ourNodeId = target.id().join();
         this.authoriser = authoriser;
         this.h = h;
-        this.cache = new LRUCache<>(cacheSize);
-        this.legacyBlocks = new LRUCache<>(cacheSize);
+        this.cache = Collections.synchronizedMap(new LRUCache<>(cacheSize));
+        this.legacyBlocks = Collections.synchronizedMap(new LRUCache<>(cacheSize));
         this.maxValueSize = maxValueSize;
         this.cacheSize = cacheSize;
-        this.pending = new LRUCache<>(100);
-        this.pendingRaw = new LRUCache<>(100);
+        this.pending = Collections.synchronizedMap(new LRUCache<>(100));
+        this.pendingRaw = Collections.synchronizedMap(new LRUCache<>(100));
     }
 
     public Collection<byte[]> getCached() {
@@ -88,7 +88,7 @@ public class AuthedCachingStorage extends DelegatingStorage {
     }
 
     @Override
-    public CompletableFuture<Optional<CborObject>> get(Cid key, Optional<BatWithId> bat) {
+    public CompletableFuture<Optional<CborObject>> get(PublicKeyHash owner, Cid key, Optional<BatWithId> bat) {
         if (cache.containsKey(key))
             return authoriseGet(key, cache.get(key), bat)
                     .thenApply(res -> Optional.of(CborObject.fromByteArray(res)));
@@ -104,7 +104,7 @@ public class AuthedCachingStorage extends DelegatingStorage {
         pending.put(key, pipe);
 
         CompletableFuture<Optional<CborObject>> result = new CompletableFuture<>();
-        target.get(key, bat).thenAccept(cborOpt -> {
+        target.get(owner, key, bat).thenAccept(cborOpt -> {
             if (cborOpt.isPresent()) {
                 byte[] value = cborOpt.get().toByteArray();
                 if (value.length > 0 && value.length < maxValueSize)
@@ -141,7 +141,7 @@ public class AuthedCachingStorage extends DelegatingStorage {
     }
 
     @Override
-    public CompletableFuture<Optional<byte[]>> getRaw(Cid key, Optional<BatWithId> bat) {
+    public CompletableFuture<Optional<byte[]>> getRaw(PublicKeyHash owner, Cid key, Optional<BatWithId> bat) {
         if (cache.containsKey(key))
             return authoriseGet(key, cache.get(key), bat)
                     .thenApply(res -> Optional.of(res));
@@ -155,7 +155,7 @@ public class AuthedCachingStorage extends DelegatingStorage {
 
         CompletableFuture<Optional<byte[]>> pipe = new CompletableFuture<>();
         pendingRaw.put(key, pipe);
-        return target.getRaw(key, bat).thenApply(rawOpt -> {
+        return target.getRaw(owner, key, bat).thenApply(rawOpt -> {
             if (rawOpt.isPresent()) {
                 byte[] value = rawOpt.get();
                 if (value.length > 0 && value.length < maxValueSize) {
@@ -168,7 +168,7 @@ public class AuthedCachingStorage extends DelegatingStorage {
             pipe.complete(rawOpt);
             return rawOpt;
         }).exceptionally(t -> {
-            pending.remove(key);
+            pendingRaw.remove(key);
             pipe.completeExceptionally(t);
             return Optional.empty();
         });

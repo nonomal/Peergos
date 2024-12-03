@@ -2,11 +2,9 @@ package peergos.shared.messaging;
 
 import jsinterop.annotations.*;
 import peergos.shared.*;
-import peergos.shared.crypto.*;
 import peergos.shared.crypto.hash.*;
 import peergos.shared.display.*;
 import peergos.shared.messaging.messages.*;
-import peergos.shared.storage.*;
 import peergos.shared.storage.auth.*;
 import peergos.shared.user.*;
 import peergos.shared.user.fs.*;
@@ -65,7 +63,7 @@ public class Messenger {
         PrivateChatState privateChatState = Chat.generateChatIdentity(crypto);
         byte[] rawPrivateChatState = privateChatState.serialize();
         return createChatRoot(chatId)
-                .thenCompose(chatRoot -> chatRoot.getOrMkdirs(PathUtil.get("shared"), context.network, false, chatRoot.mirrorBatId(), crypto)
+                .thenCompose(chatRoot -> chatRoot.getOrMkdirs(PathUtil.get("shared"), context.network, false, context.mirrorBatId(), crypto)
                         .thenCompose(chatSharedDir -> chatRoot.getUpdated(network)
                                 .thenCompose(updatedChatRoot -> chatSharedDir.setProperties(chatSharedDir.getFileProperties(), hasher,
                                         network, Optional.of(updatedChatRoot)).thenCompose(b -> chatSharedDir.getUpdated(network))))
@@ -91,7 +89,7 @@ public class Messenger {
 
     private CompletableFuture<FileWrapper> createChatRoot(String chatId) {
         return context.getUserRoot()
-                .thenCompose(home -> home.getOrMkdirs(PathUtil.get(MESSAGING_BASE_DIR), context.network, true, home.mirrorBatId(), context.crypto))
+                .thenCompose(home -> home.getOrMkdirs(PathUtil.get(MESSAGING_BASE_DIR), context.network, true, context.mirrorBatId(), context.crypto))
                 .thenCompose(chatsRoot -> chatsRoot.mkdir(chatId, context.network, false, chatsRoot.mirrorBatId(), crypto))
                 .thenCompose(updated -> updated.getChild(chatId, hasher, network))
                 .thenApply(Optional::get);
@@ -125,7 +123,7 @@ public class Messenger {
                 .thenApply(Optional::get)
                 .thenApply(parent -> parent.getName())
                 .thenCompose(chatId -> createChatRoot(chatId) // This will error if a chat with this chatId already exists
-                        .thenCompose(chatRoot -> chatRoot.getOrMkdirs(PathUtil.get("shared"), network, false, chatRoot.mirrorBatId(), crypto)
+                        .thenCompose(chatRoot -> chatRoot.getOrMkdirs(PathUtil.get("shared"), network, false, context.mirrorBatId(), crypto)
                                 .thenCompose(shared -> ChatController.getChatState(sourceChatSharedDir, network, crypto)
                                         .thenCompose(mirrorState -> {
                                             Chat ourVersion = mirrorState.copy(new Member(context.username,
@@ -242,7 +240,7 @@ public class Messenger {
         return getOrMkdirToStoreMedia(current, postTime)
                 .thenCompose(p -> p.right.uploadAndReturnFile(uuid, media, length, false, monitor,
                         p.right.mirrorBatId(), network, crypto)
-                        .thenCompose(f ->  media.reset().thenCompose(r -> crypto.hasher.hash(r, length))
+                        .thenCompose(f ->  media.reset().thenCompose(r -> crypto.hasher.hashFromStream(r, length))
                                 .thenApply(hash -> new Pair<>(f.getFileProperties().getType(),
                                         new FileRef(p.left.resolve(uuid).toString(), f.readOnlyPointer(), hash)))));
     }
@@ -260,7 +258,7 @@ public class Messenger {
                 Integer.toString(postTime.getYear()),
                 Integer.toString(postTime.getMonthValue())));
         return context.getUserRoot()
-                .thenCompose(home -> home.getOrMkdirs(dirFromHome, network, true, home.mirrorBatId(), crypto)
+                .thenCompose(home -> home.getOrMkdirs(dirFromHome, network, true, context.mirrorBatId(), crypto)
                 .thenApply(dir -> new Pair<>(PathUtil.get("/" + context.username).resolve(dirFromHome), dir)));
     }
 
@@ -289,11 +287,16 @@ public class Messenger {
     @JsMethod
     public CompletableFuture<Set<ChatController>> listChats() {
         return context.getUserRoot()
-                .thenCompose(home -> home.getOrMkdirs(PathUtil.get(MESSAGING_BASE_DIR), network, true, home.mirrorBatId(), crypto))
+                .thenCompose(home -> home.getOrMkdirs(PathUtil.get(MESSAGING_BASE_DIR), network, true, context.mirrorBatId(), crypto))
                 .thenCompose(chatsRoot -> chatsRoot.getChildren(hasher, network))
                 .thenCompose(chatDirs -> Futures.combineAll(chatDirs.stream()
-                        .map(d -> ChatController.getChatController(d, context, cache))
-                        .collect(Collectors.toList())));
+                        .map(d -> ChatController.getChatController(d, context, cache)
+                                .thenApply(Optional::of)
+                                .exceptionally(t -> Optional.empty()))
+                        .collect(Collectors.toList()))
+                        .thenApply(res -> res.stream()
+                                .flatMap(Optional::stream)
+                                .collect(Collectors.toSet())));
     }
 
     private CompletableFuture<MessageStore> getMessageStoreMirror(String username, String uuid) {

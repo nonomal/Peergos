@@ -68,11 +68,11 @@ public class SocialFeed {
         byte[] raw = post.serialize();
         AsyncReader reader = AsyncReader.build(raw);
         return context.getUserRoot()
-                .thenCompose(home -> home.getOrMkdirs(dir, network, true, home.mirrorBatId(), crypto))
+                .thenCompose(home -> home.getOrMkdirs(dir, network, true, context.mirrorBatId(), crypto))
                 .thenCompose(postDir -> postDir.uploadAndReturnFile(postFilename, reader, raw.length, false,
                         postDir.mirrorBatId(), network, crypto)
                         .thenApply(f -> new Pair<>(PathUtil.get(post.author).resolve(dir).resolve(postFilename), f)))
-                .thenCompose(p -> addToFeed(Arrays.asList(new SharedItem(p.right.readOnlyPointer(),
+                .thenCompose(p -> addToFeed(p.right.version, Arrays.asList(new SharedItem(p.right.readOnlyPointer(),
                         context.username, context.username, p.left.toString())))
                         .thenApply(f -> p));
     }
@@ -99,7 +99,7 @@ public class SocialFeed {
         return getOrMkdirToStoreMedia("media", postTime)
                 .thenCompose(p -> p.right.uploadAndReturnFile(uuid, media, length, false, monitor,
                         p.right.mirrorBatId(), network, crypto)
-                        .thenCompose(f ->  media.reset().thenCompose(r -> crypto.hasher.hash(r, length))
+                        .thenCompose(f ->  media.reset().thenCompose(r -> crypto.hasher.hashFromStream(r, length))
                                 .thenApply(hash -> new Pair<>(f.getFileProperties().getType(),
                                         new FileRef(p.left.resolve(uuid).toString(), f.readOnlyPointer(), hash)))));
     }
@@ -109,7 +109,7 @@ public class SocialFeed {
                 Integer.toString(postTime.getYear()),
                 mediaType);
         return context.getUserRoot()
-                .thenCompose(home -> home.getOrMkdirs(dirFromHome, network, true, home.mirrorBatId(), crypto)
+                .thenCompose(home -> home.getOrMkdirs(dirFromHome, network, true, context.mirrorBatId(), crypto)
                 .thenApply(dir -> new Pair<>(PathUtil.get("/" + context.username).resolve(dirFromHome), dir)));
     }
 
@@ -197,7 +197,7 @@ public class SocialFeed {
     private CompletableFuture<Boolean> mergeCommentsIntoParent(String parentPath,
                                                                List<Triple<SharedItem, FileWrapper, SocialPost>> comments) {
         return Futures.combineAllInOrder(comments.stream().map(t -> t.middle.getInputStream(network, crypto, x -> {})
-                .thenCompose(reader -> crypto.hasher.hash(reader, t.middle.getSize())
+                .thenCompose(reader -> crypto.hasher.hashFromStream(reader, t.middle.getSize())
                         .thenApply(h -> new FileRef(t.left.path, t.left.cap, h))))
                 .collect(Collectors.toList())).thenCompose(refs ->
                 context.getByPath(parentPath).thenCompose(fopt -> {
@@ -235,18 +235,28 @@ public class SocialFeed {
     @JsMethod
     public synchronized CompletableFuture<SocialFeed> update() {
         PublicKeyHash owner = context.signer.publicKeyHash;
-        BufferedNetworkAccess buffered = BufferedNetworkAccess.build(network, 10 * 1024 * 1024, owner, () -> true, network.hasher);
-        return buffered.synchronizer.applyComplexComputation(owner, dataDir.signingPair(),
+        return network.synchronizer.applyComplexComputation(owner, dataDir.signingPair(),
                 (s, c) -> {
-                    Committer condenser = buffered.buildCommitter(c);
                     return context.getFollowingNodes()
-                            .thenCompose(friends -> Futures.reduceAll(friends.stream(), new Pair<>(s, Stream.<Update>empty()),
-                                    (p, friend) -> getFriendUpdate(friend, p.left, condenser, buffered)
+                            .thenCompose(friends -> {
+                                List<CompletableFuture<Optional<Pair<FriendSourcedTrieNode,Snapshot>>>> pointers = friends.stream()
+                                        .map(f -> f.getLatestVersion(network).thenApply(v -> Optional.of(new Pair<>(f, v))).exceptionally(t -> Optional.empty()))
+                                        .collect(Collectors.toList());
+                                return Futures.combineAllInOrder(pointers)
+                                        .thenApply(pairs -> pairs.stream()
+                                                .flatMap(Optional::stream)
+                                                .map(p -> new Pair<>(Stream.of(p.left), p.right))
+                                                .reduce((a, b) -> new Pair<>(Stream.concat(a.left, b.left), a.right.merge(b.right))))
+                                        .thenApply(combined ->  new Pair<>(
+                                                combined.map(p ->  p.left.collect(Collectors.toSet())).orElse(Collections.emptySet()),
+                                                combined.map(p ->  p.right).map(s::mergeAndOverwriteWith).orElse(s)));
+                            })
+                            .thenCompose(fv -> Futures.reduceAll(fv.left.stream(), new Pair<>(fv.right, Stream.<Update>empty()),
+                                    (p, friend) -> getFriendUpdate(friend, p.left, c, network)
                                             .thenApply(res -> new Pair<>(res.left, Stream.concat(p.right, res.right.stream()))),
                                     (a, b) -> b));
                 }
-        ).thenCompose(updates -> buffered.commit()
-                .thenCompose(x -> mergeUpdates(updates.right.collect(Collectors.toList()))));
+        ).thenCompose(updates -> mergeUpdates(updates.left, updates.right.collect(Collectors.toList())));
     }
 
     private static class Update extends Triple<String, ProcessedCaps, CapsDiff> {
@@ -261,7 +271,7 @@ public class SocialFeed {
                                                                                 NetworkAccess network) {
         ProcessedCaps current = currentCapBytesProcessed.getOrDefault(friend.ownerName, ProcessedCaps.empty());
         return friend.updateIncludingGroups(s, c, network)
-                .thenCompose(p -> friend.getCaps(current, network)
+                .thenCompose(p -> friend.getCaps(current, s,network)
                         .thenApply(diff -> {
                             if (diff.isEmpty())
                                 return new Pair<>(p.left, Optional.<Update>empty());
@@ -269,7 +279,7 @@ public class SocialFeed {
                         }));
     }
 
-    private synchronized CompletableFuture<SocialFeed> mergeUpdates(Collection<Triple<String, ProcessedCaps, CapsDiff>> updates) {
+    private synchronized CompletableFuture<SocialFeed> mergeUpdates(Snapshot v, Collection<Triple<String, ProcessedCaps, CapsDiff>> updates) {
         List<SharedItem> forFeed = new ArrayList<>();
         for (Triple<String, ProcessedCaps, CapsDiff> update : updates) {
             ProcessedCaps updated = update.middle.add(update.right);
@@ -279,7 +289,7 @@ public class SocialFeed {
                     .map(c -> new SharedItem(c.cap, extractOwner(c.path), update.left, c.path))
                     .forEach(forFeed::add);
         }
-        return addToFeed(forFeed);
+        return addToFeed(v, forFeed);
     }
 
     private CompletableFuture<List<Pair<SharedItem, FileWrapper>>> mergeInComments(List<SharedItem> shared) {
@@ -291,7 +301,8 @@ public class SocialFeed {
         return PathUtil.get(path).getName(0).toString();
     }
 
-    private synchronized CompletableFuture<SocialFeed> addToFriend(String friendName,
+    private synchronized CompletableFuture<SocialFeed> addToFriend(Snapshot v,
+                                                                   String friendName,
                                                                    ProcessedCaps current,
                                                                    CapsDiff diff) {
         ProcessedCaps updated = current.add(diff);
@@ -300,12 +311,12 @@ public class SocialFeed {
         List<SharedItem> forFeed = newCaps.stream()
                 .map(c -> new SharedItem(c.cap, extractOwner(c.path), friendName, c.path))
                 .collect(Collectors.toList());
-        return addToFeed(forFeed);
+        return addToFeed(v, forFeed);
     }
 
-    private synchronized CompletableFuture<SocialFeed> addToFeed(List<SharedItem> newItems) {
+    private synchronized CompletableFuture<SocialFeed> addToFeed(Snapshot v, List<SharedItem> newItems) {
         if (newItems.isEmpty())
-            return Futures.of(this);
+            return setVersion(v).thenApply(x -> this);
         return mergeInComments(newItems).thenCompose(b -> {
             ByteArrayOutputStream bout = new ByteArrayOutputStream();
             for (SharedItem item : newItems) {
@@ -325,35 +336,36 @@ public class SocialFeed {
     private synchronized CompletableFuture<Snapshot> appendToFeedAndCommitState(byte[] data, int records) {
         PublicKeyHash owner = context.signer.publicKeyHash;
         // use a buffered network to make this atomic across multiple files
-        BufferedNetworkAccess buffered = BufferedNetworkAccess.build(network, 10 * 1024 * 1024, owner, () -> true, network.hasher);
-        return buffered.synchronizer.applyComplexUpdate(dataDir.owner(), dataDir.signingPair(),
+        return network.synchronizer.applyComplexUpdate(dataDir.owner(), dataDir.signingPair(),
                 (s, c) -> {
-                    Committer condenser = buffered.buildCommitter(c);
-                    return dataDir.getUpdated(s, buffered).thenCompose(updated ->
-                            updated.getChild(FEED_FILE, crypto.hasher, buffered).thenCompose(feedOpt -> {
+                    return dataDir.getUpdated(s, network).thenCompose(updated ->
+                            updated.getChild(FEED_FILE, crypto.hasher, network).thenCompose(feedOpt -> {
                                 if (feedOpt.isEmpty())
-                                    return updated.uploadFileSection(updated.version, condenser, FEED_FILE, AsyncReader.build(data),
+                                    return updated.uploadFileSection(updated.version, c, FEED_FILE, AsyncReader.build(data),
                                             false, 0, data.length, Optional.empty(), false, false,
-                                            false, buffered, crypto, x -> {},
+                                            false, network, crypto, x -> {},
                                             crypto.random.randomBytes(RelativeCapability.MAP_KEY_LENGTH),
                                             Optional.empty(),  Optional.of(Bat.random(crypto.random)), updated.mirrorBatId());
                                 if (feedOpt.get().getSize() != feedSizeBytes)
                                     throw new IllegalStateException("Feed size incorrect!");
-                                return feedOpt.get().append(data, buffered, crypto, condenser, x -> {});
+                                return feedOpt.get().append(data, network, crypto, c, x -> {});
                             })).thenCompose(s2 -> {
                         feedSizeRecords += records;
                         feedSizeBytes += data.length;
                         byte[] raw = new FeedState(lastSeenIndex, feedSizeRecords, feedSizeBytes, currentCapBytesProcessed).serialize();
-                        return stateFile.overwriteFile(AsyncReader.build(raw), raw.length, buffered, crypto, x -> {}, s2, condenser);
-                    }).thenCompose(v -> buffered.commit().thenApply(b -> v));
-                }).thenCompose(s -> this.dataDir.getUpdated(s, network).thenApply(u -> {
-                    this.dataDir = u;
-                    return true;
-                }).thenCompose(x -> this.stateFile.getUpdated(s, network).thenApply(us -> {
-                    this.stateFile = us;
-                    return s;
-                }))
-        );
+                        return stateFile.overwriteFile(AsyncReader.build(raw), raw.length, network, crypto, x -> {}, s2, c);
+                    });
+                }).thenCompose(this::setVersion);
+    }
+
+    private CompletableFuture<Snapshot> setVersion(Snapshot s) {
+        return dataDir.getUpdated(s, network).thenApply(u -> {
+            this.dataDir = u;
+            return true;
+        }).thenCompose(x -> this.stateFile.getUpdated(s, network).thenApply(us -> {
+            this.stateFile = us;
+            return s;
+        }));
     }
 
     private CompletableFuture<Boolean> ensureFeedUptodate() {
@@ -390,7 +402,7 @@ public class SocialFeed {
 
     public static CompletableFuture<SocialFeed> create(UserContext c) {
         return c.getUserRoot()
-                .thenCompose(home -> home.getOrMkdirs(PathUtil.get(UserContext.FEED_DIR_NAME), c.network, true, home.mirrorBatId(), c.crypto))
+                .thenCompose(home -> home.getOrMkdirs(PathUtil.get(UserContext.FEED_DIR_NAME), c.network, true, c.mirrorBatId(), c.crypto))
                 .thenCompose(feedDir -> {
                     FeedState empty = new FeedState(0, 0, 0L, Collections.emptyMap());
                     byte[] rawEmpty = empty.serialize();

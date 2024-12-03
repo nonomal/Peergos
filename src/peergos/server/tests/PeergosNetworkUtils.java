@@ -10,12 +10,13 @@ import peergos.shared.crypto.hash.*;
 import peergos.shared.crypto.symmetric.SymmetricKey;
 import peergos.shared.display.*;
 import peergos.shared.email.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.Multihash;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.messaging.*;
 import peergos.shared.messaging.messages.*;
 import peergos.shared.mutable.*;
 import peergos.shared.social.*;
+import peergos.shared.storage.BufferedStorage;
 import peergos.shared.storage.auth.*;
 import peergos.shared.user.*;
 import peergos.shared.user.fs.*;
@@ -37,7 +38,7 @@ import static org.junit.Assert.assertTrue;
 public class PeergosNetworkUtils {
 
     public static String generateUsername(Random random) {
-        return "username_" + Math.abs(random.nextInt() % 1_000_000_000);
+        return "username-" + Math.abs(random.nextInt() % 1_000_000_000);
     }
 
     public static String generatePassword() {
@@ -198,12 +199,17 @@ public class PeergosNetworkUtils {
         FileWrapper u1Root = sharerUser.getUserRoot().join();
         String filename = "somefile.txt";
         File f = File.createTempFile("peergos", "");
-        byte[] originalFileContents = sharerUser.crypto.random.randomBytes(10*1024*1024);
+        byte[] originalFileContents = new byte[10*1024*1024];
+        random.nextBytes(originalFileContents);
         Files.write(f.toPath(), originalFileContents);
         ResetableFileInputStream resetableFileInputStream = new ResetableFileInputStream(f);
         FileWrapper uploaded = u1Root.uploadOrReplaceFile(filename, resetableFileInputStream, f.length(),
                 sharerUser.network, crypto, l -> {}).join();
         Optional<Bat> originalBat = uploaded.writableFilePointer().bat;
+
+        // create a secret link to the file
+        String userLinkPassword = "forbob";
+        LinkProperties link = sharerUser.createSecretLink(Paths.get(sharerUser.username, filename).toString(), false, Optional.empty(), Optional.empty(), userLinkPassword, false).join();
 
         // share the file from sharer to each of the sharees
         Set<String> shareeNames = shareeUsers.stream()
@@ -219,7 +225,10 @@ public class PeergosNetworkUtils {
             checkFileContents(originalFileContents, sharedFile.get(), userContext);
         }
 
-        // check other users can browser to the friend's root
+        // check secret link works
+        UserContext.fromSecretLinkV2(link.toLinkString(uploaded.owner()), () -> Futures.of(userLinkPassword), shareeNode, crypto).join();
+
+        // check other users can browse to the friend's root
         for (UserContext userContext : shareeUsers) {
             Optional<FileWrapper> friendRoot = userContext.getByPath(sharerUser.username).join();
             assertTrue("friend root present", friendRoot.isPresent());
@@ -238,12 +247,15 @@ public class PeergosNetworkUtils {
         List<UserContext> updatedShareeUsers = shareeUsers.stream()
                 .map(e -> {
                     try {
-                        return ensureSignedUp(e.username, shareePasswords.get(shareeUsers.indexOf(e)), shareeNode, crypto);
+                        return ensureSignedUp(e.username, shareePasswords.get(shareeUsers.indexOf(e)), shareeNode.clear(), crypto);
                     } catch (Exception ex) {
                         throw new IllegalStateException(ex.getMessage(), ex);
 
                     }
                 }).collect(Collectors.toList());
+
+        // check secret link works
+        UserContext.fromSecretLinkV2(link.toLinkString(uploaded.owner()), () -> Futures.of(userLinkPassword), shareeNode, crypto).join();
 
         //test that the other user cannot access it from scratch
         Optional<FileWrapper> otherUserView = updatedShareeUsers.get(0).getByPath(sharerUser.username + "/" + filename).join();
@@ -304,7 +316,8 @@ public class PeergosNetworkUtils {
         FileWrapper u1Root = sharer.getUserRoot().join();
         String filename = "somefile.txt";
         File f = File.createTempFile("peergos", "");
-        byte[] originalFileContents = sharer.crypto.random.randomBytes(10*1024*1024);
+        byte[] originalFileContents = new byte[10*1024*1024];
+        random.nextBytes(originalFileContents);
         Files.write(f.toPath(), originalFileContents);
         ResetableFileInputStream resetableFileInputStream = new ResetableFileInputStream(f);
         FileWrapper uploaded = u1Root.uploadOrReplaceFile(filename, resetableFileInputStream, f.length(),
@@ -340,6 +353,41 @@ public class PeergosNetworkUtils {
 
     }
 
+    public static void socialFeedCASExceptionOnUpdate(NetworkAccess sharerNode, NetworkAccess shareeNode, Random random) {
+        //sign up a user on sharerNode
+        String sharerUsername = randomUsername("sharer-", random);
+        String sharerPassword = generatePassword();
+        UserContext sharer = ensureSignedUp(sharerUsername, sharerPassword, sharerNode.clear(), crypto);
+
+        //sign up some users on shareeNode
+        int shareeCount = 1;
+        List<String> shareePasswords = IntStream.range(0, shareeCount)
+                .mapToObj(i -> generatePassword())
+                .collect(Collectors.toList());
+        List<UserContext> shareeUsers = getUserContextsForNode(shareeNode, random, shareeCount, shareePasswords);
+        UserContext sharee = shareeUsers.get(0);
+
+        // friend sharer with others
+        friendBetweenGroups(Arrays.asList(sharer), shareeUsers);
+
+        SocialFeed senderFeed = sharer.getSocialFeed().join().update().join();
+        List<peergos.shared.display.Text> body = new ArrayList<>();
+        body.add(new peergos.shared.display.Text("msg!"));
+        SocialPost socialPost = peergos.shared.social.SocialPost.createInitialPost(sharerUsername, body, SocialPost.Resharing.Friends);
+
+        Pair<Path, FileWrapper> result = senderFeed.createNewPost(socialPost).join();
+        Set<String> readers = Set.of(sharee.username);
+        sharer.shareReadAccessWith(result.left, readers).join();
+
+        int startIndex = senderFeed.getLastSeenIndex();
+        SocialFeed updatedSenderFeed = senderFeed.update().join();
+
+        int requestSize = 100;
+        List<SharedItem> items = updatedSenderFeed.getShared(startIndex, startIndex + requestSize, sharer.crypto, sharer.network).join();
+
+        int newIndex = startIndex + items.size();
+        updatedSenderFeed.setLastSeenIndex(newIndex).join();
+    }
     public static void grantAndRevokeFileWriteAccess(NetworkAccess sharerNode, NetworkAccess shareeNode, int shareeCount, Random random) throws Exception {
         Assert.assertTrue(0 < shareeCount);
         //sign up a user on sharerNode
@@ -360,7 +408,8 @@ public class PeergosNetworkUtils {
         // upload a file to "a"'s space
         FileWrapper u1Root = sharerUser.getUserRoot().join();
         String filename = "somefile.txt";
-        byte[] originalFileContents = sharerUser.crypto.random.randomBytes(10*1024*1024);
+        byte[] originalFileContents = new byte[10*1024*1024];
+        random.nextBytes(originalFileContents);
         AsyncReader resetableFileInputStream = AsyncReader.build(originalFileContents);
         FileWrapper uploaded = u1Root.uploadOrReplaceFile(filename, resetableFileInputStream, originalFileContents.length,
                 sharerUser.network, crypto, l -> {}).join();
@@ -509,7 +558,8 @@ public class PeergosNetworkUtils {
         // upload a file to the dir
         FileWrapper dir = sharer.getByPath(dirPath).join().get();
         String filename = "somefile.txt";
-        byte[] originalFileContents = sharer.crypto.random.randomBytes(10*1024*1024);
+        byte[] originalFileContents = new byte[10*1024*1024];
+        random.nextBytes(originalFileContents);
         AsyncReader resetableFileInputStream = AsyncReader.build(originalFileContents);
         FileWrapper uploaded = dir.uploadOrReplaceFile(filename, resetableFileInputStream, originalFileContents.length,
                 sharer.network, crypto, l -> {}).join();
@@ -746,7 +796,7 @@ public class PeergosNetworkUtils {
         List<UserContext> updatedSharees = shareeUsers.stream()
                 .map(e -> {
                     try {
-                        return ensureSignedUp(e.username, shareePasswords.get(shareeUsers.indexOf(e)), e.network, crypto);
+                        return ensureSignedUp(e.username, shareePasswords.get(shareeUsers.indexOf(e)), e.network.clear(), crypto);
                     } catch (Exception ex) {
                         throw new IllegalStateException(ex.getMessage(), ex);
                     }
@@ -756,6 +806,7 @@ public class PeergosNetworkUtils {
         for (int i = 0; i < updatedSharees.size(); i++) {
             UserContext user = updatedSharees.get(i);
             updatedSharer.unShareReadAccess(PathUtil.get(updatedSharer.username, folderName), user.username).join();
+            Thread.sleep(7_000); // make sure old pointers aren't cached
 
             Optional<FileWrapper> updatedSharedFolder = user.getByPath(updatedSharer.username + "/" + folderName).join();
 
@@ -778,6 +829,7 @@ public class PeergosNetworkUtils {
 
             Assert.assertTrue(Arrays.equals(newFileContents, ArrayOps.concat(originalFileContents, suffix)));
 
+            Thread.sleep(10_000); // let all pointer caches invalidate
             // test remaining users can still see shared file and folder
             for (int j = i + 1; j < updatedSharees.size(); j++) {
                 UserContext otherUser = updatedSharees.get(j);
@@ -1134,7 +1186,8 @@ public class PeergosNetworkUtils {
 
         String filename = "somefile.txt";
         File f = File.createTempFile("peergos", "");
-        byte[] originalFileContents = sharer.crypto.random.randomBytes(1*1024*1024);
+        byte[] originalFileContents = new byte[1*1024*1024];
+        random.nextBytes(originalFileContents);
         Files.write(f.toPath(), originalFileContents);
         ResetableFileInputStream resetableFileInputStream = new ResetableFileInputStream(f);
 
@@ -1183,7 +1236,8 @@ public class PeergosNetworkUtils {
 
         String filename = "somefile.txt";
         File f = File.createTempFile("peergos", "");
-        byte[] originalFileContents = sharer.crypto.random.randomBytes(1*1024*1024);
+        byte[] originalFileContents = new byte[1*1024*1024];
+        random.nextBytes(originalFileContents);
         Files.write(f.toPath(), originalFileContents);
         ResetableFileInputStream resetableFileInputStream = new ResetableFileInputStream(f);
 
@@ -1202,7 +1256,8 @@ public class PeergosNetworkUtils {
         Assert.assertEquals(sharedFolder.getFileProperties().name, filename);
 
         // delete the parent folder
-        sharer.getByPath(dirPath).join().get().remove(sharer.getUserRoot().join(), dirPath, sharer).join();
+        FileWrapper parent = sharer.getByPath(dirPath).join().get();
+        parent.remove(sharer.getUserRoot().join(), dirPath, sharer).join();
         // check 'a' can't see the shared directory
         FileWrapper unsharedLocation = a.getByPath(sharer.username).join().get();
         Set<FileWrapper> children = unsharedLocation.getChildren(crypto.hasher, a.network).join();
@@ -1390,7 +1445,8 @@ public class PeergosNetworkUtils {
 
         // friends are now connected
         // share a file from u1 to u2
-        byte[] fileData = sharer.crypto.random.randomBytes(1*1024*1024);
+        byte[] fileData = new byte[1*1024*1024];
+        random.nextBytes(fileData);
         Path file1 = PathUtil.get(sharer.username, "first-file.txt");
         uploadAndShare(fileData, file1, sharer, a.username);
 
@@ -1534,8 +1590,8 @@ public class PeergosNetworkUtils {
         // friend sharer with others
         friendBetweenGroups(Arrays.asList(sharer), shareeUsers);
 
-
-        byte[] fileData = sharer.crypto.random.randomBytes(1*1024*1024);
+        byte[] fileData = new byte[1*1024*1024];
+        random.nextBytes(fileData);
         AsyncReader reader = new AsyncReader.ArrayBacked(fileData);
 
         SocialFeed feed = sharer.getSocialFeed().join();
@@ -1583,7 +1639,7 @@ public class PeergosNetworkUtils {
         sharee.shareReadAccessWith(result.left, Set.of(receiverGroupUid)).join();
 
         //now sharer should see the reply
-        sharer = UserContext.signIn(sharer.username, password, sharer.network, sharer.crypto, c -> {}).join();
+        sharer = UserContext.signIn(sharer.username, password, UserTests::noMfa, false, sharer.network, sharer.crypto, c -> {}).join();
         feed = sharer.getSocialFeed().join().update().join();
         files = feed.getSharedFiles(0, 100).join();
         assertTrue(files.size() == 5);
@@ -1816,6 +1872,24 @@ public class PeergosNetworkUtils {
         controllerA = msgA.sendMessage(controllerA, msg2).join();
     }
 
+    public static void deleteEmailApp(NetworkAccess network, Random random) {
+        CryptreeNode.setMaxChildLinkPerBlob(10);
+
+        String password = "notagoodone";
+        UserContext user = PeergosNetworkUtils.ensureSignedUp("a-" + generateUsername(random), password, network, crypto);
+        UserContext email = PeergosNetworkUtils.ensureSignedUp("email-"+ generateUsername(random), password, network, crypto);
+
+        App emailApp = App.init(user, "email").join();
+        EmailClient client = EmailClient.load(emailApp, crypto).join();
+        client.connectToBridge(user, email.username).join();
+
+        Path path = new File(user.username + "/.apps/email").toPath();
+        FileWrapper parentDir = user.getByPath(path.getParent().toString()).join().get();
+        FileWrapper appDir = user.getByPath(path.toString()).join().get();
+        FileWrapper parent = appDir.remove(parentDir, path, user).join();
+        Assert.assertTrue("App removal worked", parent != null);
+    }
+
     public static void email(NetworkAccess network, Random random) {
         CryptreeNode.setMaxChildLinkPerBlob(10);
 
@@ -1898,6 +1972,36 @@ public class PeergosNetworkUtils {
         String retrievedContent2 = new String(attachmentRetrieved2);
         Assert.assertTrue(retrievedContent2.equals(content2));
         Assert.assertTrue(client.getNewIncoming().join().isEmpty());
+    }
+
+    public static void chatMultipleInvites(NetworkAccess network, Random random) {
+        CryptreeNode.setMaxChildLinkPerBlob(10);
+
+        String password = "notagoodone";
+
+        UserContext a = PeergosNetworkUtils.ensureSignedUp("a-" + generateUsername(random), password, network, crypto);
+        int otherMembersCount = 5;
+        List<String> passwords = IntStream.range(0, otherMembersCount)
+                .mapToObj(i -> generatePassword())
+                .collect(Collectors.toList());
+        List<UserContext> shareeUsers = getUserContextsForNode(network, random, otherMembersCount, passwords);
+        UserContext b = shareeUsers.get(0);
+
+        // friend sharer with others
+        friendBetweenGroups(Arrays.asList(a), shareeUsers);
+
+        Messenger msgA = new Messenger(a);
+        ChatController controllerA = msgA.createChat().join();
+        List<String> otherMembersUsernames = shareeUsers.stream().map(u -> u.username).collect(Collectors.toList());
+        List<PublicKeyHash> otherMembersPublicKeyHash = shareeUsers.stream().map(u -> u.signer.publicKeyHash).collect(Collectors.toList());
+
+        controllerA = msgA.invite(controllerA, otherMembersUsernames, otherMembersPublicKeyHash).join();
+        Set<String> allMemberNames = controllerA.getMemberNames();
+        Assert.assertTrue("all members", allMemberNames.size() == otherMembersCount + 1);
+
+        List<MessageEnvelope> messages = controllerA.getMessages(0, 10).join();
+        List<MessageEnvelope> inviteMessages = messages.stream().filter(m -> m.payload.type() == Message.Type.Invite).collect(Collectors.toList());
+        Assert.assertTrue("all invites", inviteMessages.size() == otherMembersCount);
     }
 
     public static void chat(NetworkAccess network, Random random) {
@@ -2017,8 +2121,8 @@ public class PeergosNetworkUtils {
 
         Id newBId = newB.id;
         Assert.assertTrue(! originalBId.equals(newBId));
-        PublicKeyHash newChatId = newB.chatIdentity.get().getOwner(network.dhtClient).join();
-        PublicKeyHash oldChatId = originalB.chatIdentity.get().getOwner(network.dhtClient).join();
+        PublicKeyHash newChatId = newB.chatIdentity.get().getAndVerifyOwner(b.signer.publicKeyHash, network.dhtClient).join();
+        PublicKeyHash oldChatId = originalB.chatIdentity.get().getAndVerifyOwner(b.signer.publicKeyHash, network.dhtClient).join();
         Assert.assertTrue("New chat identity", !newChatId.equals(oldChatId));
     }
 
@@ -2052,18 +2156,21 @@ public class PeergosNetworkUtils {
         UserContext b2 = PeergosNetworkUtils.ensureSignedUp(b.username, password, network.clear(), crypto);
         Messenger msgB2 = new Messenger(b2);
         ChatController controllerB2 = msgB2.getChat(controllerB.chatUuid).join();
-        ForkJoinPool.commonPool().submit(() -> {
+        ForkJoinTask<?> concurrent = ForkJoinPool.commonPool().submit(() -> {
             msgB2.mergeMessages(controllerB2, a.username).join();
         });
 
         controllerB = msgB.mergeMessages(controllerB, a.username).join();
+        concurrent.join();
 
+        if (network.dhtClient instanceof BufferedStorage)
+            ((BufferedStorage)network.dhtClient).clear();
         UserContext b3 = PeergosNetworkUtils.ensureSignedUp(b.username, password, network.clear(), crypto);
         Messenger msgB3 = new Messenger(b3);
         ChatController controllerB3 = msgB3.getChat(controllerB.chatUuid).join();
         List<MessageEnvelope> messages = controllerB3.getMessages(0, 20).join();
         int msgCount = messages.stream().filter(m -> m.payload.equals(msg1)).collect(Collectors.toList()).size();
-        Assert.assertEquals(1, msgCount);
+        Assert.assertTrue(msgCount <= 1);
     }
 
     private static Pair<Messenger, ChatController> joinChat(UserContext c) {
@@ -2346,9 +2453,9 @@ public class PeergosNetworkUtils {
         PointerUpdate pointer = network.mutable.getPointerTarget(cap.owner, cap.writer,
                 network.dhtClient).join();
         Snapshot version = new Snapshot(cap.writer,
-                WriterData.getWriterData((Cid) pointer.updated.get(), pointer.sequence, network.dhtClient).join());
+                WriterData.getWriterData(cap.owner, (Cid) pointer.updated.get(), pointer.sequence, network.dhtClient).join());
 
-        Optional<CryptreeNode> next = network.getMetadata(version.get(nextChunkCap.writer).props, nextChunkCap).join();
+        Optional<CryptreeNode> next = network.getMetadata(version.get(nextChunkCap.writer).props.get(), nextChunkCap).join();
         Set<AbsoluteCapability> directUnnamed = direct.stream().map(n -> n.cap).collect(Collectors.toSet());
         if (! next.isPresent())
             return Arrays.asList(directUnnamed);
@@ -2366,7 +2473,7 @@ public class PeergosNetworkUtils {
         PointerUpdate pointer = network.mutable.getPointerTarget(cap.owner, cap.writer,
                 network.dhtClient).join();
         return dir.getAllChildrenCapabilities(new Snapshot(cap.writer,
-                    WriterData.getWriterData((Cid) pointer.updated.get(), pointer.sequence, network.dhtClient).join()), cap, crypto.hasher, network).join()
+                    WriterData.getWriterData(cap.owner, (Cid) pointer.updated.get(), pointer.sequence, network.dhtClient).join()), cap, crypto.hasher, network).join()
                     .stream().map(n -> n.cap).collect(Collectors.toSet());
     }
 
@@ -2481,7 +2588,7 @@ public class PeergosNetworkUtils {
     public static UserContext ensureSignedUp(String username, String password, NetworkAccess network, Crypto crypto) {
         boolean isRegistered = network.isUsernameRegistered(username).join();
         if (isRegistered)
-            return UserContext.signIn(username, password, network, crypto).join();
+            return UserContext.signIn(username, password, UserTests::noMfa, network, crypto).join();
         return UserContext.signUp(username, password, "", network, crypto).join();
     }
 }

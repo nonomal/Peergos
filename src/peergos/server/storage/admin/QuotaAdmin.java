@@ -4,8 +4,9 @@ import peergos.shared.cbor.*;
 import peergos.shared.crypto.asymmetric.*;
 import peergos.shared.crypto.hash.*;
 import peergos.shared.crypto.random.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.*;
+import peergos.shared.storage.controller.*;
 import peergos.shared.util.*;
 
 import java.util.*;
@@ -15,9 +16,13 @@ import java.util.*;
  */
 public interface QuotaAdmin extends QuotaControl {
 
-    boolean acceptingSignups();
+    AllowedSignups acceptingSignups();
 
     boolean allowSignupOrUpdate(String username, String token);
+
+    PaymentProperties createPaidUser(String username);
+
+    void removeDesiredQuota(String username);
 
     boolean addToken(String token);
 
@@ -41,14 +46,15 @@ public interface QuotaAdmin extends QuotaControl {
 
     static QuotaControl.SpaceRequest parseQuotaRequest(PublicKeyHash owner, byte[] signedRequest, ContentAddressedStorage dht) {
         // check request is valid
-        Optional<PublicSigningKey> ownerOpt = dht.getSigningKey(owner).join();
+        Optional<PublicSigningKey> ownerOpt = dht.getSigningKey(owner, owner).join();
         if (!ownerOpt.isPresent())
             throw new IllegalStateException("Couldn't retrieve owner key!");
-        byte[] raw = ownerOpt.get().unsignMessage(signedRequest);
+        byte[] raw = ownerOpt.get().unsignMessage(signedRequest).join();
         CborObject cbor = CborObject.fromByteArray(raw);
         QuotaControl.SpaceRequest req = QuotaControl.SpaceRequest.fromCbor(cbor);
-        if (req.utcMillis < System.currentTimeMillis() - 30_000)
-            throw new IllegalStateException("Stale auth time in space request!");
+        long now = System.currentTimeMillis();
+        if (req.utcMillis < now - 300_000)
+            throw new IllegalStateException("Stale auth time in space request! " + req.utcMillis + " !< " + now + " - 30000");
         return req;
     }
 }

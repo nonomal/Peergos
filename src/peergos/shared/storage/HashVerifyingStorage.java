@@ -2,8 +2,8 @@ package peergos.shared.storage;
 
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.auth.*;
 import peergos.shared.util.*;
 
@@ -68,8 +68,8 @@ public class HashVerifyingStorage extends DelegatingStorage {
     }
 
     @Override
-    public CompletableFuture<Optional<CborObject>> get(Cid hash, Optional<BatWithId> bat) {
-        return source.get(hash, bat)
+    public CompletableFuture<Optional<CborObject>> get(PublicKeyHash owner, Cid hash, Optional<BatWithId> bat) {
+        return source.get(owner, hash, bat)
                 .thenCompose(cborOpt -> cborOpt.map(cbor -> verify(cbor.toByteArray(), hash, () -> cbor)
                         .thenApply(Optional::of))
                         .orElseGet(() -> Futures.of(Optional.empty())));
@@ -89,8 +89,8 @@ public class HashVerifyingStorage extends DelegatingStorage {
     }
 
     @Override
-    public CompletableFuture<Optional<byte[]>> getRaw(Cid hash, Optional<BatWithId> bat) {
-        return source.getRaw(hash, bat)
+    public CompletableFuture<Optional<byte[]>> getRaw(PublicKeyHash owner, Cid hash, Optional<BatWithId> bat) {
+        return source.getRaw(owner, hash, bat)
                 .thenCompose(arrOpt -> arrOpt.map(bytes -> verify(bytes, hash, () -> bytes)
                         .thenApply(Optional::of))
                         .orElseGet(() -> Futures.of(Optional.empty())));

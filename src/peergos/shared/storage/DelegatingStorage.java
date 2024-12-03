@@ -2,12 +2,13 @@ package peergos.shared.storage;
 
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.auth.*;
 import peergos.shared.user.fs.*;
 import peergos.shared.util.*;
 
+import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 
@@ -35,6 +36,11 @@ public abstract class DelegatingStorage implements ContentAddressedStorage {
     }
 
     @Override
+    public CompletableFuture<List<Cid>> ids() {
+        return target.ids();
+    }
+
+    @Override
     public CompletableFuture<TransactionId> startTransaction(PublicKeyHash owner) {
         return target.startTransaction(owner);
     }
@@ -50,8 +56,8 @@ public abstract class DelegatingStorage implements ContentAddressedStorage {
     }
 
     @Override
-    public CompletableFuture<Optional<CborObject>> get(Cid hash, Optional<BatWithId> bat) {
-        return target.get(hash, bat);
+    public CompletableFuture<Optional<CborObject>> get(PublicKeyHash owner, Cid hash, Optional<BatWithId> bat) {
+        return target.get(owner, hash, bat);
     }
 
     @Override
@@ -65,23 +71,33 @@ public abstract class DelegatingStorage implements ContentAddressedStorage {
     }
 
     @Override
-    public CompletableFuture<Boolean> flush() {
-        return target.flush();
+    public CompletableFuture<Optional<byte[]>> getRaw(PublicKeyHash owner, Cid hash, Optional<BatWithId> bat) {
+        return target.getRaw(owner, hash, bat);
     }
 
     @Override
-    public CompletableFuture<Optional<byte[]>> getRaw(Cid hash, Optional<BatWithId> bat) {
-        return target.getRaw(hash, bat);
+    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat, Optional<Cid> committedRoot) {
+        return target.getChampLookup(owner, root, champKey, bat, committedRoot);
     }
 
     @Override
-    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat) {
-        return target.getChampLookup(owner, root, champKey, bat);
+    public CompletableFuture<EncryptedCapability> getSecretLink(SecretLink link) {
+        return target.getSecretLink(link);
+    }
+
+    @Override
+    public CompletableFuture<LinkCounts> getLinkCounts(String owner, LocalDateTime after, BatWithId mirrorBat) {
+        return target.getLinkCounts(owner, after, mirrorBat);
     }
 
     @Override
     public CompletableFuture<Optional<Integer>> getSize(Multihash block) {
         return target.getSize(block);
+    }
+
+    @Override
+    public CompletableFuture<IpnsEntry> getIpnsEntry(Multihash signer) {
+        return target.getIpnsEntry(signer);
     }
 
     @Override
@@ -104,8 +120,9 @@ public abstract class DelegatingStorage implements ContentAddressedStorage {
                                                             PublicKeyHash writer,
                                                             List<byte[]> signedHashes,
                                                             List<Integer> blockSizes,
+                                                            List<List<BatId>> batIds,
                                                             boolean isRaw,
                                                             TransactionId tid) {
-        return target.authWrites(owner, writer, signedHashes, blockSizes, isRaw, tid);
+        return target.authWrites(owner, writer, signedHashes, blockSizes, batIds, isRaw, tid);
     }
 }

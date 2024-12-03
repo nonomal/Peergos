@@ -3,7 +3,7 @@ package peergos.shared.storage.controller;
 import jsinterop.annotations.*;
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.*;
 import peergos.shared.util.*;
 
@@ -33,7 +33,7 @@ public interface InstanceAdmin {
                                                    byte[] signedRequest);
 
     @JsMethod
-    CompletableFuture<Boolean> acceptingSignups();
+    CompletableFuture<AllowedSignups> acceptingSignups();
 
     @JsMethod
     CompletableFuture<Boolean> addToWaitList(String email);

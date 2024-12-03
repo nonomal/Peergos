@@ -4,8 +4,9 @@ import peergos.server.sql.*;
 import peergos.server.util.Logging;
 import peergos.shared.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
+import peergos.shared.util.*;
 
 import java.sql.*;
 import java.util.*;
@@ -127,6 +128,24 @@ public class JdbcUsageStore implements UsageStore {
         }
     }
 
+    public Map<String, Long> getAllUsage() {
+        try (Connection conn = getConnection();
+             PreparedStatement search = conn.prepareStatement("SELECT u.name, uu.total_bytes " +
+                     "FROM users u, userusage uu WHERE u.id = uu.user_id;")) {
+            Map<String, Long> usage = new HashMap<>();
+            ResultSet resultSet = search.executeQuery();
+            while (resultSet.next()) {
+                String username = resultSet.getString(1);
+                long total = resultSet.getLong(2);
+                usage.put(username, total);
+            }
+            return usage;
+        } catch (SQLException sqe) {
+            LOG.log(Level.WARNING, sqe.getMessage(), sqe);
+            throw new RuntimeException(sqe);
+        }
+    }
+
     @Override
     public UserUsage getUsage(String username) {
         int userId = getUserId(username);
@@ -226,9 +245,9 @@ public class JdbcUsageStore implements UsageStore {
     @Override
     public Set<PublicKeyHash> getAllWriters() {
         try (Connection conn = getConnection();
-             PreparedStatement insert = conn.prepareStatement("SELECT key_hash FROM writers;")) {
+             PreparedStatement query = conn.prepareStatement("SELECT key_hash FROM writers;")) {
             Set<PublicKeyHash> res = new HashSet<>();
-            ResultSet resultSet = insert.executeQuery();
+            ResultSet resultSet = query.executeQuery();
             while (resultSet.next())
                 res.add(PublicKeyHash.decode(resultSet.getBytes(1)));
             return res;
@@ -239,17 +258,64 @@ public class JdbcUsageStore implements UsageStore {
     }
 
     @Override
-    public List<Multihash> getAllTargets() {
+    public Set<PublicKeyHash> getAllWriters(PublicKeyHash owner) {
         try (Connection conn = getConnection();
-             PreparedStatement get = conn.prepareStatement("SELECT target FROM writerusage;")) {
-            List<Multihash> res = new ArrayList<>();
+             PreparedStatement idQuery = conn.prepareStatement("SELECT id FROM writers WHERE key_hash=?;");
+             PreparedStatement query = conn.prepareStatement("SELECT writers.key_hash FROM writers " +
+                     "INNER JOIN ownedkeys ON writers.id=ownedkeys.owned_id WHERE ownedkeys.parent_id=?;")) {
+            idQuery.setBytes(1, owner.toBytes());
+            ResultSet idRes = idQuery.executeQuery();
+            if (!idRes.next())
+                return Collections.emptySet();
+            int id = idRes.getInt(1);
+            query.setInt(1, id);
+
+            Set<PublicKeyHash> res = new HashSet<>();
+            res.add(owner);
+            ResultSet resultSet = query.executeQuery();
+            while (resultSet.next())
+                res.add(PublicKeyHash.decode(resultSet.getBytes(1)));
+            return res;
+        } catch (SQLException sqe) {
+            LOG.log(Level.WARNING, sqe.getMessage(), sqe);
+            throw new RuntimeException(sqe);
+        }
+    }
+
+    @Override
+    public Set<PublicKeyHash> getAllWriters(String owner) {
+        try (Connection conn = getConnection();
+             PreparedStatement query = conn.prepareStatement("SELECT writers.key_hash FROM writers " +
+                     "INNER JOIN ownedkeys ON writers.id=ownedkeys.owned_id " +
+                     "INNER JOIN writerusage ON ownedkeys.parent_id=writerusage.writer_id " +
+                     "INNER JOIN users ON writerusage.user_id=users.id WHERE users.name=?;")) {
+            query.setString(1, owner);
+
+            Set<PublicKeyHash> res = new HashSet<>();
+            ResultSet resultSet = query.executeQuery();
+            while (resultSet.next())
+                res.add(PublicKeyHash.decode(resultSet.getBytes(1)));
+            return res;
+        } catch (SQLException sqe) {
+            LOG.log(Level.WARNING, sqe.getMessage(), sqe);
+            throw new RuntimeException(sqe);
+        }
+    }
+
+    @Override
+    public List<Pair<Multihash, String>> getAllTargets() {
+        try (Connection conn = getConnection();
+             PreparedStatement get = conn.prepareStatement("SELECT writerusage.target,users.name FROM writerusage " +
+                     "INNER JOIN users ON writerusage.user_id=users.id;")) {
+            List<Pair<Multihash, String>> res = new ArrayList<>();
             ResultSet resultSet = get.executeQuery();
             while (resultSet.next()) {
                 MaybeMultihash target = Optional.ofNullable(resultSet.getBytes(1))
                     .map(x -> MaybeMultihash.of(Cid.cast(x)))
                     .orElse(MaybeMultihash.empty());
+                String username = resultSet.getString(2);
                 if (target.isPresent())
-                    res.add(target.get());
+                    res.add(new Pair<>(target.get(), username));
             }
             return res;
         } catch (SQLException sqe) {
@@ -258,7 +324,12 @@ public class JdbcUsageStore implements UsageStore {
         }
     }
 
+    private Map<PublicKeyHash, String> owners = new LRUCache<>(100);
+
     private String getOwner(PublicKeyHash writer) {
+        String cached = owners.get(writer);
+        if (cached != null)
+            return cached;
         int writerId = getWriterId(writer);
         try (Connection conn = getConnection();
              PreparedStatement search = conn.prepareStatement("SELECT u.name FROM users u, writerusage wu WHERE u.id = wu.user_id AND wu.writer_id = ?;")) {
@@ -266,7 +337,9 @@ public class JdbcUsageStore implements UsageStore {
             ResultSet resultSet = search.executeQuery();
             if (! resultSet.next())
                 throw new IllegalStateException("Unknown writer on this server!");
-            return resultSet.getString(1);
+            String owner = resultSet.getString(1);
+            owners.put(writer, owner);
+            return owner;
         } catch (SQLException sqe) {
             LOG.log(Level.WARNING, sqe.getMessage(), sqe);
             throw new RuntimeException(sqe);

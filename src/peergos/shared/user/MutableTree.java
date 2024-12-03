@@ -2,7 +2,7 @@ package peergos.shared.user;
 
 import peergos.shared.crypto.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.MaybeMultihash;
 import peergos.shared.storage.*;
 
@@ -55,10 +55,4 @@ public interface MutableTree {
                                          MaybeMultihash existing,
                                          TransactionId tid);
 
-
-    class CasException extends RuntimeException {
-        public CasException(Object actualExisting, Object claimedExisting) {
-            super("CAS exception updating cryptree node. existing: " + actualExisting + ", claimed: " + claimedExisting);
-        }
-    }
 }

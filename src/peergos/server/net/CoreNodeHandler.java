@@ -8,14 +8,16 @@ import peergos.shared.cbor.*;
 import peergos.shared.corenode.*;
 import peergos.shared.crypto.*;
 import peergos.shared.crypto.hash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.io.ipfs.api.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.storage.*;
 import peergos.shared.storage.auth.*;
 import peergos.shared.user.*;
 import peergos.shared.util.*;
 
 import java.io.*;
+import java.time.*;
 import java.util.*;
 import java.util.logging.*;
 import java.util.zip.*;
@@ -62,6 +64,14 @@ public class CoreNodeHandler implements HttpHandler
                     AggregatedMetrics.SIGNUP.inc();
                     signup(din, dout);
                     break;
+                case "startPaidSignup":
+                    AggregatedMetrics.PAID_SIGNUP_START.inc();
+                    startPaidSignup(din, dout, exchange);
+                    break;
+                case "completePaidSignup":
+                    AggregatedMetrics.PAID_SIGNUP_COMPLETE.inc();
+                    completePaidSignup(din, dout);
+                    break;
                 case "updateChain":
                     AggregatedMetrics.UPDATE_PUBLIC_KEY_CHAIN.inc();
                     updateChain(din, dout);
@@ -94,6 +104,7 @@ public class CoreNodeHandler implements HttpHandler
             exchange.sendResponseHeaders(200, b.length);
             exchange.getResponseBody().write(b);
         } catch (Exception e) {
+            e.printStackTrace();
             HttpUtil.replyError(exchange, e);
         } finally {
             exchange.close();
@@ -124,6 +135,31 @@ public class CoreNodeHandler implements HttpHandler
             dout.writeInt(err.get().requiredDifficulty);
     }
 
+    void startPaidSignup(DataInputStream din, DataOutputStream dout, HttpExchange exchange) throws Exception
+    {
+        String username = CoreNodeUtils.deserializeString(din);
+        UserPublicKeyLink chain = UserPublicKeyLink.fromCbor(CborObject.fromByteArray(Serialize.deserializeByteArray(din, 2 * UserPublicKeyLink.MAX_SIZE)));
+        ProofOfWork proof = ProofOfWork.fromCbor(CborObject.fromByteArray(Serialize.deserializeByteArray(din, 100)));
+        Either<PaymentProperties, RequiredDifficulty> res = coreNode.startPaidSignup(username, chain, proof).get();
+        dout.writeBoolean(res.isA());
+        if (res.isA())
+            Serialize.serialize(res.a().serialize(), dout);
+        else
+            dout.writeInt(res.b().requiredDifficulty);
+    }
+
+    void completePaidSignup(DataInputStream din, DataOutputStream dout) throws Exception
+    {
+        String username = CoreNodeUtils.deserializeString(din);
+        byte[] raw = Serialize.deserializeByteArray(din, 2 * UserPublicKeyLink.MAX_SIZE);
+        UserPublicKeyLink chain = UserPublicKeyLink.fromCbor(CborObject.fromByteArray(raw));
+        OpLog ops = OpLog.fromCbor(CborObject.fromByteArray(Serialize.deserializeByteArray(din, 64*1024)));
+        ProofOfWork proof = ProofOfWork.fromCbor(CborObject.fromByteArray(Serialize.deserializeByteArray(din, 100)));
+        byte[] signedSpaceRequest = Serialize.deserializeByteArray(din, 64 * 1024);
+        PaymentProperties res = coreNode.completePaidSignup(username, chain, ops, signedSpaceRequest, proof).get();
+        dout.write(res.serialize());
+    }
+
     void updateChain(DataInputStream din, DataOutputStream dout) throws Exception
     {
         String username = CoreNodeUtils.deserializeString(din);
@@ -147,7 +183,9 @@ public class CoreNodeHandler implements HttpHandler
         Optional<BatWithId> mirrorBat = hasBat ?
                 Optional.of(BatWithId.fromCbor(CborObject.fromByteArray(Serialize.deserializeByteArray(din, 128)))) :
                 Optional.empty();
-        UserSnapshot state = coreNode.migrateUser(username, newChain, currentStorageId, mirrorBat).join();
+        long seconds = din.readLong();
+        long currentUsage = din.readLong();
+        UserSnapshot state = coreNode.migrateUser(username, newChain, currentStorageId, mirrorBat, LocalDateTime.ofEpochSecond(seconds, 0, ZoneOffset.UTC), currentUsage).join();
         dout.write(state.serialize());
     }
 
