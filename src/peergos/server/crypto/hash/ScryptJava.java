@@ -1,4 +1,7 @@
 package peergos.server.crypto.hash;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.logging.*;
 
@@ -7,7 +10,7 @@ import java.util.concurrent.CompletableFuture;
 
 import peergos.shared.crypto.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.server.crypto.hash.lambdaworks.crypto.SCrypt;
 import peergos.shared.user.*;
 import peergos.shared.user.fs.*;
@@ -93,8 +96,38 @@ public class ScryptJava implements Hasher {
     }
 
     @Override
-    public CompletableFuture<Multihash> hash(AsyncReader stream, long length) {
+    public CompletableFuture<Multihash> hashFromStream(AsyncReader stream, long length) {
         return Hash.sha256(stream, length)
                 .thenApply(h -> new Multihash(Multihash.Type.sha2_256, h));
+    }
+
+    public static HashTree hashFile(Path p, Hasher hasher) {
+        byte[] buf = new byte[4 * 1024];
+        long size = p.toFile().length();
+        int chunkOffset = 0;
+        List<byte[]> chunkHashes = new ArrayList<>();
+
+        try (FileInputStream fin = new FileInputStream(p.toFile())) {
+            MessageDigest chunkHash = MessageDigest.getInstance("SHA-256");
+            for (long i = 0; i < size; ) {
+                int read = fin.read(buf);
+                chunkOffset += read;
+                if (chunkOffset >= Chunk.MAX_SIZE) {
+                    int thisChunk = read - chunkOffset + Chunk.MAX_SIZE;
+                    chunkHash.update(buf, 0, thisChunk);
+                    chunkHashes.add(chunkHash.digest());
+                    chunkHash = MessageDigest.getInstance("SHA-256");
+                    chunkOffset = 0;
+                } else
+                    chunkHash.update(buf, 0, read);
+                i += read;
+            }
+            if (size == 0 || size % Chunk.MAX_SIZE != 0)
+                chunkHashes.add(chunkHash.digest());
+
+            return HashTree.build(chunkHashes, hasher).join();
+        } catch (IOException | NoSuchAlgorithmException e) {
+            throw new RuntimeException(e);
+        }
     }
 }

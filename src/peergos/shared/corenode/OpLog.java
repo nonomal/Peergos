@@ -3,18 +3,24 @@ package peergos.shared.corenode;
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.asymmetric.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
+import peergos.shared.login.mfa.*;
 import peergos.shared.mutable.*;
 import peergos.shared.storage.*;
 import peergos.shared.storage.auth.*;
 import peergos.shared.user.*;
+import peergos.shared.user.fs.*;
 import peergos.shared.util.*;
 
+import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.stream.*;
 
+/** Oplog is used  during signup to atomically apply a set of operations
+ *
+ */
 public class OpLog implements Cborable, Account, MutablePointers, ContentAddressedStorage, BatCave {
     private static final int ED25519_SIGNATURE_SIZE = 64;
 
@@ -48,22 +54,59 @@ public class OpLog implements Cborable, Account, MutablePointers, ContentAddress
     }
 
     @Override
+    public MutablePointers clearCache() {
+        return this;
+    }
+
+    @Override
     public synchronized CompletableFuture<Boolean> setLoginData(LoginData login, byte[] auth) {
         loginData = new Pair<>(login, auth);
         return Futures.of(true);
     }
 
     @Override
-    public synchronized CompletableFuture<UserStaticData> getLoginData(String username,
-                                                                       PublicSigningKey authorisedReader,
-                                                                       byte[] auth) {
+    public synchronized CompletableFuture<Either<UserStaticData, MultiFactorAuthRequest>> getLoginData(String username,
+                                                                                                       PublicSigningKey authorisedReader,
+                                                                                                       byte[] auth,
+                                                                                                       Optional<MultiFactorAuthResponse> mfa,
+                                                                                                       boolean cacheMfaLoginData) {
         if (loginData == null)
             throw new IllegalStateException("No login data present!");
         if (! loginData.left.username.equals(username))
             throw new IllegalStateException("No login data present for " + username);
         if (! loginData.left.authorisedReader.equals(authorisedReader))
             throw new IllegalStateException("You are not authorised to login as " + username);
-        return Futures.of(loginData.left.entryPoints);
+        return Futures.of(Either.a(loginData.left.entryPoints));
+    }
+
+    @Override
+    public CompletableFuture<List<MultiFactorAuthMethod>> getSecondAuthMethods(String username, byte[] auth) {
+        throw new IllegalStateException("Unsupported operation!");
+    }
+
+    @Override
+    public CompletableFuture<Boolean> enableTotpFactor(String username, byte[] credentialId, String code, byte[] auth) {
+        throw new IllegalStateException("Unsupported operation!");
+    }
+
+    @Override
+    public CompletableFuture<byte[]> registerSecurityKeyStart(String username, byte[] auth) {
+        throw new IllegalStateException("Unsupported operation!");
+    }
+
+    @Override
+    public CompletableFuture<Boolean> registerSecurityKeyComplete(String username, String keyName, MultiFactorAuthResponse resp, byte[] auth) {
+        throw new IllegalStateException("Unsupported operation!");
+    }
+
+    @Override
+    public CompletableFuture<Boolean> deleteSecondFactor(String username, byte[] credentialId, byte[] auth) {
+        throw new IllegalStateException("Unsupported operation!");
+    }
+
+    @Override
+    public CompletableFuture<TotpKey> addTotpFactor(String username, byte[] auth) {
+        throw new IllegalStateException("Unsupported operation!");
     }
 
     @Override
@@ -95,6 +138,16 @@ public class OpLog implements Cborable, Account, MutablePointers, ContentAddress
     }
 
     @Override
+    public CompletableFuture<List<Cid>> ids() {
+        throw new IllegalStateException("Unsupported operation!");
+    }
+
+    @Override
+    public CompletableFuture<String> linkHost(PublicKeyHash owner) {
+        throw new IllegalStateException("Unsupported operation!");
+    }
+
+    @Override
     public CompletableFuture<TransactionId> startTransaction(PublicKeyHash owner) {
         return Futures.of(new TransactionId("1"));
     }
@@ -116,7 +169,7 @@ public class OpLog implements Cborable, Account, MutablePointers, ContentAddress
     }
 
     @Override
-    public CompletableFuture<Optional<CborObject>> get(Cid hash, Optional<BatWithId> bat) {
+    public CompletableFuture<Optional<CborObject>> get(PublicKeyHash owner, Cid hash, Optional<BatWithId> bat) {
         return Futures.of(Optional.ofNullable(storage.get(hash)).map(CborObject::fromByteArray));
     }
 
@@ -137,18 +190,28 @@ public class OpLog implements Cborable, Account, MutablePointers, ContentAddress
         byte[] hash = Arrays.copyOfRange(signedHash, ED25519_SIGNATURE_SIZE, signedHash.length);
         Cid h = new Cid(1, isRaw ? Cid.Codec.Raw : Cid.Codec.DagCbor, Multihash.Type.sha2_256, hash);
         storage.put(h, block);
-        operations.add(Either.b(new BlockWrite(writer, signedHash, block, isRaw)));
+        operations.add(Either.b(new BlockWrite(writer, signedHash, block, isRaw, Optional.empty())));
         return Futures.of(h);
     }
 
     @Override
-    public CompletableFuture<Optional<byte[]>> getRaw(Cid hash, Optional<BatWithId> bat) {
+    public CompletableFuture<Optional<byte[]>> getRaw(PublicKeyHash owner, Cid hash, Optional<BatWithId> bat) {
         return Futures.of(Optional.ofNullable(storage.get(hash)));
     }
 
     @Override
-    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat) {
+    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat, Optional<Cid> committedRoot) {
         return Futures.of(new ArrayList<>(storage.values()));
+    }
+
+    @Override
+    public CompletableFuture<EncryptedCapability> getSecretLink(SecretLink link) {
+        throw new IllegalStateException("Unsupported operation!");
+    }
+
+    @Override
+    public CompletableFuture<LinkCounts> getLinkCounts(String owner, LocalDateTime after, BatWithId mirrorBat) {
+        throw new IllegalStateException("Unsupported operation!");
     }
 
     @Override
@@ -156,16 +219,25 @@ public class OpLog implements Cborable, Account, MutablePointers, ContentAddress
         throw new IllegalStateException("Unsupported operation!");
     }
 
+    @Override
+    public CompletableFuture<IpnsEntry> getIpnsEntry(Multihash signer) {
+        throw new IllegalStateException("Unimplemented!");
+    }
+
     public static final class BlockWrite implements Cborable {
         public final PublicKeyHash writer;
         public final byte[] signature, block;
         public final boolean isRaw;
+        public final Optional<ProgressConsumer<Long>> progressMonitor;
 
-        public BlockWrite(PublicKeyHash writer, byte[] signature, byte[] block, boolean isRaw) {
+        public BlockWrite(PublicKeyHash writer, byte[] signature, byte[] block, boolean isRaw, Optional<ProgressConsumer<Long>> progressMonitor) {
+            if (block.length == 0)
+                throw new IllegalArgumentException("Empty byte array in block write!");
             this.writer = writer;
             this.signature = signature;
             this.block = block;
             this.isRaw = isRaw;
+            this.progressMonitor = progressMonitor;
         }
 
         @Override
@@ -187,7 +259,7 @@ public class OpLog implements Cborable, Account, MutablePointers, ContentAddress
             byte[] signature = m.getByteArray("s");
             byte[] block = m.getByteArray("b");
             boolean isRaw = m.getBoolean("r");
-            return new BlockWrite(writer, signature, block, isRaw);
+            return new BlockWrite(writer, signature, block, isRaw, Optional.empty());
         }
 
         @Override
@@ -222,6 +294,11 @@ public class OpLog implements Cborable, Account, MutablePointers, ContentAddress
             PublicKeyHash writer = m.get("w", PublicKeyHash::fromCbor);
             byte[] signedUpdate = m.getByteArray("s");
             return new PointerWrite(writer, signedUpdate);
+        }
+
+        @Override
+        public String toString() {
+            return writer.toString();
         }
     }
 

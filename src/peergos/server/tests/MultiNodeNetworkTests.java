@@ -5,6 +5,7 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import peergos.server.*;
 import peergos.server.storage.*;
+import peergos.server.tests.util.*;
 import peergos.server.util.*;
 import peergos.shared.*;
 import peergos.shared.cbor.*;
@@ -12,8 +13,8 @@ import peergos.shared.corenode.*;
 import peergos.shared.crypto.*;
 import peergos.shared.crypto.hash.*;
 import peergos.shared.crypto.symmetric.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.social.*;
 import peergos.shared.storage.auth.*;
 import peergos.shared.user.*;
@@ -38,12 +39,12 @@ import static peergos.server.tests.PeergosNetworkUtils.*;
 public class MultiNodeNetworkTests {
     private static Args args = UserTests.buildArgs()
             .with("useIPFS", "true")
+            .with("enable-gc", "true")
             .with(IpfsWrapper.IPFS_BOOTSTRAP_NODES, ""); // no bootstrapping
-
     private static Random random = new Random(0);
     private static List<NetworkAccess> nodes = new ArrayList<>();
-    private static List<UserService> services = new ArrayList<>();
-
+    private static List<ServerProcesses> services = new ArrayList<>();
+    private static final List<Args> argsToCleanUp = new ArrayList<>();
     private final Crypto crypto = Main.initCrypto();
 
     private final int iNode1, iNode2;
@@ -72,12 +73,9 @@ public class MultiNodeNetworkTests {
         });
     }
 
-    private static final List<Args> argsToCleanUp = new ArrayList<>();
-
     @AfterClass
     public static void cleanup() {
         try {Thread.sleep(2000);}catch (InterruptedException e) {}
-        argsToCleanUp.add(args);
         for (Args toClean : argsToCleanUp) {
             Path peergosDir = toClean.fromPeergosDir("", "");
             System.out.println("Deleting " + peergosDir);
@@ -89,61 +87,110 @@ public class MultiNodeNetworkTests {
         return nodes.get(i);
     }
 
+    private void stopServer(int i)  {
+        ServerProcesses server = services.get(i);
+        server.localApi.stop();
+        server.p2pApi.stop();
+        if (server.ipfs != null)
+            server.ipfs.stop();
+    }
+
+    private void startServer(int i) throws Exception  {
+        if (i == 0)
+            throw new IllegalStateException("Restarting PKI not yet supported in test");
+        Args startArgs = argsToCleanUp.get(i).with(IpfsWrapper.IPFS_BOOTSTRAP_NODES, buildBootstrapList(i));
+        ServerProcesses service = Main.PEERGOS.main(startArgs);
+        service.localApi.gc.stop();
+        services.set(i, service);
+        nodes.set(i, buildApi(startArgs));
+    }
+
+    private static String buildBootstrapList(int exclude) {
+        StringBuilder res = new StringBuilder();
+        for (int i=0; i < 3; i++) {
+            if (i != exclude && services.size() > i) {
+                res.append(","+Main.getLocalBootstrapAddress(
+                        argsToCleanUp.get(i).getInt("ipfs-swarm-port"),
+                        services.get(i).localApi.storage.id().join().bareMultihash()));
+            }
+        }
+        return res.toString().substring(1);
+    }
+
+    private void rotateServerIdentity(int i)  {
+        if (i == 0)
+            throw new IllegalStateException("Rotating PKI identity not yet supported in test");
+        Optional<Path> config = Optional.of(argsToCleanUp.get(i).getPeergosDirChild("config"));
+        Args withPrivKey = Args.parse(new String[0], config, false);
+        ServerIdentity.ROTATE.main(withPrivKey);
+        Args withNewPrivKey = Args.parse(new String[0], config, false);
+        String bootstrapList = Main.getLocalBootstrapAddress(argsToCleanUp.get(0).getInt("ipfs-swarm-port"), services.get(0).localApi.storage.id().join().bareMultihash()).toString();
+        for (int n = 1; n < 3; n++)
+            if (n != i)
+                bootstrapList += "," + Main.getLocalBootstrapAddress(argsToCleanUp.get(n).getInt("ipfs-swarm-port"), services.get(n).localApi.storage.id().join().bareMultihash());
+        argsToCleanUp.set(i, withNewPrivKey.with(IpfsWrapper.IPFS_BOOTSTRAP_NODES, bootstrapList));
+    }
+
     private UserService getService(int i)  {
-        return services.get(i);
+        return services.get(i).localApi;
     }
 
     @BeforeClass
     public static void init() throws Exception {
+        System.getProperties().setProperty("io.netty.eventLoopThreads", "1");
         // start pki node
-        UserService pki = Main.PKI_INIT.main(args.with("allow-target", "/ip4/127.0.0.1/tcp/8002"));
-        PublicKeyHash peergosId = pki.coreNode.getPublicKeyHash("peergos").join().get();
+        ServerProcesses pki = Main.PKI_INIT.main(args);
+        PublicKeyHash peergosId = pki.localApi.coreNode.getPublicKeyHash("peergos").join().get();
         args = args.setArg("peergos.identity.hash", peergosId.toString());
         NetworkAccess toPki = buildApi(args);
         Multihash pkiNodeId = toPki.dhtClient.id().get();
         nodes.add(toPki);
         services.add(pki);
+        pki.localApi.gc.stop();
+        argsToCleanUp.add(args);
         int bootstrapSwarmPort = args.getInt("ipfs-swarm-port");
+        String bootstrapList = Main.getLocalBootstrapAddress(bootstrapSwarmPort, pkiNodeId).toString();
 
         // create two other nodes that use the first as a PKI-node
         for (int i = 0; i < 2; i++) {
-            int ipfsApiPort = 9000 + random.nextInt(8000);
-            int ipfsGatewayPort = 9000 + random.nextInt(8000);
-            int ipfsSwarmPort = 9000 + random.nextInt(8000);
-            int peergosPort = 9000 + random.nextInt(8000);
-            int proxyTargetPort = 9000 + random.nextInt(8000);
-            int allowPort = 9000 + random.nextInt(8000);
+            int ipfsApiPort = TestPorts.getPort();System.out.println("node" + (i+1) + " base port: " + ipfsApiPort);
+            int ipfsGatewayPort = TestPorts.getPort();
+            int ipfsSwarmPort = TestPorts.getPort();
+            int peergosPort = TestPorts.getPort();
+            int proxyTargetPort = TestPorts.getPort();
             Args normalNode = UserTests.buildArgs()
                     .with("useIPFS", "true")
+                    .with("enable-gc", "true")
                     .with("port", "" + peergosPort)
                     .with("pki-node-id", pkiNodeId.toString())
                     .with("peergos.identity.hash", peergosId.toString())
                     .with("ipfs-api-address", "/ip4/127.0.0.1/tcp/" + ipfsApiPort)
                     .with("ipfs-gateway-address", "/ip4/127.0.0.1/tcp/" + ipfsGatewayPort)
-                    .with("allow-target", "/ip4/127.0.0.1/tcp/" + allowPort)
                     .with("ipfs-swarm-port", "" + ipfsSwarmPort)
-                    .with(IpfsWrapper.IPFS_BOOTSTRAP_NODES, "" + Main.getLocalBootstrapAddress(bootstrapSwarmPort, pkiNodeId))
+                    .with(IpfsWrapper.IPFS_BOOTSTRAP_NODES, bootstrapList)
                     .with("proxy-target", Main.getLocalMultiAddress(proxyTargetPort).toString())
                     .with("ipfs-api-address", Main.getLocalMultiAddress(ipfsApiPort).toString());
             argsToCleanUp.add(normalNode);
-            UserService service = Main.PEERGOS.main(normalNode);
+            ServerProcesses service = Main.PEERGOS.main(normalNode);
             services.add(service);
 
-//            IPFS ipfs = new IPFS(Main.getLocalMultiAddress(ipfsApiPort));
-//            ipfs.swarm.connect(Main.getLocalBootstrapAddress(bootstrapSwarmPort, pkiNodeId).toString());
+            service.localApi.gc.stop();
+            Multihash ourId = service.localApi.storage.id().get();
+            bootstrapList += "," + Main.getLocalBootstrapAddress(ipfsSwarmPort, ourId);
+
             nodes.add(buildApi(normalNode));
         }
     }
 
     private static NetworkAccess buildApi(Args args) throws Exception {
         URL local = new URL("http://localhost:" + args.getInt("port"));
-        return Builder.buildNonCachingJavaNetworkAccess(local, false, Optional.empty()).get();
+        return Builder.buildNonCachingJavaNetworkAccess(local, false, 1_000, Optional.empty(), Optional.empty()).get();
     }
 
     @Before
     public void gc() {
-        for (UserService service : services) {
-            service.gc.collect(s -> Futures.of(true));
+        for (ServerProcesses service : services) {
+            service.localApi.gc.collect(s -> Futures.of(true));
         }
     }
 
@@ -152,18 +199,22 @@ public class MultiNodeNetworkTests {
         UserContext context = ensureSignedUp(generateUsername(random), randomString(), getNode(iNode1), crypto);
 
         for (NetworkAccess node: nodes) {
-            long usage = node.spaceUsage.getUsage(context.signer.publicKeyHash).join();
-            byte[] signedTime = TimeLimitedClient.signNow(context.signer.secret);
+            long usage = node.spaceUsage.getUsage(context.signer.publicKeyHash,
+                    TimeLimitedClient.signNow(context.signer.secret).join()).join();
+            byte[] signedTime = TimeLimitedClient.signNow(context.signer.secret).join();
             long quota = node.spaceUsage.getQuota(context.signer.publicKeyHash, signedTime).join();
             Assert.assertTrue(usage >0 && quota > 0);
         }
     }
 
     @Test
-    public void migrate() {
+    public void migrateWithZeroPwdChanges() {
         migrate(0);
+    }
+
+    @Test
+    public void migrateWith1PwdChanges() {
         migrate(1);
-        migrate(2);
     }
 
     public void migrate(int nPasswordChanges) {
@@ -179,7 +230,7 @@ public class MultiNodeNetworkTests {
         UserContext user = ensureSignedUp(username, password, node1, crypto);
         for (int i=0; i < nPasswordChanges; i++) {
             String newPassword = randomString();
-            user = ensureSignedUp(username, password, node2, crypto).changePassword(password, newPassword).join();
+            user = ensureSignedUp(username, password, node2, crypto).changePassword(password, newPassword, UserTests::noMfa).join();
             password = newPassword;
         }
         // make sure we have some raw fragments
@@ -194,7 +245,7 @@ public class MultiNodeNetworkTests {
         Assert.assertTrue(node1.clear().getFile(badCap, username).join().isEmpty());
 
         Multihash fragment = file.getPointer().fileAccess.toCbor().links().get(0);
-        CompletableFuture<Optional<byte[]>> raw = node1.clear().dhtClient.getRaw((Cid) fragment, Optional.empty());
+        CompletableFuture<Optional<byte[]>> raw = node1.clear().dhtClient.getRaw(user.signer.publicKeyHash, (Cid) fragment, Optional.empty());
         Assert.assertTrue(raw.isCompletedExceptionally() || raw.join().isEmpty());
 
         UserContext friend = ensureSignedUp(generateUsername(random), password, node1, crypto);
@@ -210,7 +261,7 @@ public class MultiNodeNetworkTests {
         Assert.assertTrue(bats.equals(batsViaNewNode));
         Optional<BatWithId> mirrorBat = Optional.of(bats.get(bats.size() - 1));
         long usageVia1 = user.getSpaceUsage().join();
-        userViaNewServer.network.coreNode.migrateUser(username, newChain, originalNodeId, mirrorBat).join();
+        userViaNewServer.network.coreNode.migrateUser(username, newChain, originalNodeId, mirrorBat, LocalDateTime.now(), usageVia1).join();
 
         List<UserPublicKeyLink> chain = userViaNewServer.network.coreNode.getChain(username).join();
         Multihash storageNode = chain.get(chain.size() - 1).claim.storageProviders.stream().findFirst().get();
@@ -221,7 +272,8 @@ public class MultiNodeNetworkTests {
         long usageVia2 = postMigration.getSpaceUsage().join();
         // Note we currently don't remove the old pointer after changing password,
         // so there is a 5kib reduction after migration per password change
-        Assert.assertTrue(usageVia2 == usageVia1 || (nPasswordChanges > 0 && usageVia2 < usageVia1));
+        Assert.assertTrue("Usage after migrate: " + usageVia2 + ", usage before: " + usageVia1,
+                usageVia2 == usageVia1 || (nPasswordChanges > 0 && usageVia2 < usageVia1));
 
         // check pending followRequest was transferred
         List<FollowRequestWithCipherText> followRequests = postMigration.processFollowRequests().join();
@@ -233,7 +285,7 @@ public class MultiNodeNetworkTests {
 
         // check a reverse migration can't be triggered by anyone else
         try {
-            node1.coreNode.migrateUser(username, existing, newStorageNodeId, mirrorBat).join();
+            node1.coreNode.migrateUser(username, existing, newStorageNodeId, mirrorBat, LocalDateTime.now(), usageVia2).join();
             throw new RuntimeException("Shouldn't get here!");
         } catch (CompletionException e) {
             if (! e.getCause().getMessage().startsWith("Migration+claim+has+earlier+expiry+than+current+one"))
@@ -248,6 +300,26 @@ public class MultiNodeNetworkTests {
         } catch (CompletionException e) {
             if (! e.getCause().getMessage().startsWith("New%2Bclaim%2Bchain%2Bexpiry%2Bbefore%2Bexisting"))
                 throw new RuntimeException(e.getCause());
+        }
+    }
+
+    @Test
+    public void largeP2pWrites() {
+        if (iNode1 == 0 || iNode2 == 0)
+            return; // Don't test to/from pki node
+        String username = generateUsername(random);
+        String password = randomString();
+        NetworkAccess node1 = getNode(iNode1);
+        NetworkAccess node2 = getNode(iNode2);
+        UserContext user = ensureSignedUp(username, password, node1, crypto);
+
+        UserContext viaProxy = ensureSignedUp(username, password, node2, crypto);
+
+        byte[] data = new byte[2 * 1024 * 1024];
+
+        for (int i=0; i < 100; i++) {
+            FileWrapper home = viaProxy.getUserRoot().join();
+            home.uploadFileJS(i + "", AsyncReader.build(data), 0, data.length, false, home.mirrorBatId(), node2, crypto, x -> {}, viaProxy.getTransactionService(), f -> Futures.of(true)).join();
         }
     }
 
@@ -271,14 +343,14 @@ public class MultiNodeNetworkTests {
         List<UserPublicKeyLink> evilChain = evil.network.coreNode.getChain(evilusername).join();
         UserPublicKeyLink evilLast = evilChain.get(0);
         UserPublicKeyLink.Claim newClaim = UserPublicKeyLink.Claim.build(username, evil.signer.secret,
-                LocalDate.now().plusMonths(2), Arrays.asList(newStorageNodeId));
+                LocalDate.now().plusMonths(2), Arrays.asList(newStorageNodeId)).join();
         UserPublicKeyLink evilUpdate = evilLast.withClaim(newClaim);
         List<UserPublicKeyLink> newChain = Arrays.asList(evilUpdate);
         UserContext userViaNewServer = ensureSignedUp(username, password, getNode(iNode2), crypto);
         List<BatWithId> bats = user.network.batCave.getUserBats(username, userViaNewServer.signer).join();
         Optional<BatWithId> mirrorBat = Optional.of(bats.get(bats.size() - 1));
         try {
-            userViaNewServer.network.coreNode.migrateUser(username, newChain, originalNodeId, mirrorBat).join();
+            userViaNewServer.network.coreNode.migrateUser(username, newChain, originalNodeId, mirrorBat, LocalDateTime.now(), 1_000_000).join();
             throw new RuntimeException("Shouldn't get here!");
         } catch (CompletionException e) {}
 
@@ -329,6 +401,7 @@ public class MultiNodeNetworkTests {
         FileWrapper root = u1.getUserRoot().get();
         FileWrapper upload = root.uploadOrReplaceFile(filename, new AsyncReader.ArrayBacked(data), data.length,
                 getNode(iNode1), crypto, x -> {}).get();
+        Thread.sleep(10_000); // make sure pointer cache is invalidated
         Optional<FileWrapper> file = u1.getByPath("/" + username1 + "/" + filename).get();
         Assert.assertTrue(file.isPresent());
     }
@@ -348,5 +421,51 @@ public class MultiNodeNetworkTests {
     @Test
     public void publicLinkToFile() throws Exception {
         PeergosNetworkUtils.publicLinkToFile(random, getNode(iNode1), getNode(iNode2));
+    }
+
+    @Ignore
+    @Test
+    public void serverIdentityRotation() throws Exception {
+        if (iNode1 == 0 || iNode2 == 0)
+            return; // Don't test migration to/from pki node
+
+        String password = randomString();
+        String username = generateUsername(random);
+        UserContext context = ensureSignedUp(username, password, getNode(iNode1), crypto);
+        byte[] fileData = new byte[6*1024*1024];
+        new Random(28).nextBytes(fileData);
+        String filename = "somefile.bin";
+        context.getUserRoot().join().uploadOrReplaceFile(filename, AsyncReader.build(fileData),
+                fileData.length, context.network, crypto,  x -> {}).join();
+        FileWrapper file = context.getByPath(PathUtil.get(context.username + "/" + filename)).join().get();
+        AbsoluteCapability cap = file.getPointer().capability.readOnly();
+
+        context.getUserRoot().join().uploadOrReplaceFile(filename+"2", AsyncReader.build(fileData),
+                fileData.length, context.network, crypto,  x -> {}).join();
+        FileWrapper file2 = context.getByPath(PathUtil.get(context.username + "/" + filename + "2")).join().get();
+        AbsoluteCapability cap2 = file2.getPointer().capability.readOnly();
+
+        Multihash originalHost = context.network.coreNode.getHomeServer(context.username).join().get();
+
+        // rotate server identity, and check file cap works from other server
+        stopServer(iNode1);
+        rotateServerIdentity(iNode1);
+        startServer(iNode1);
+        Thread.sleep(60_000); // wait one DNS cycle
+
+        // login through other server
+        ensureSignedUp(username, password, getNode(iNode2), crypto);
+
+        FileWrapper fromOtherServer = getNode(iNode2).getFile(cap, context.username).join().get();
+
+        // update owner host and check cap still works from other server
+        context = ensureSignedUp(username, password, getNode(iNode1), crypto);
+        context.ensureCurrentHost().join();
+        Multihash updatedHost = context.network.coreNode.getHomeServer(context.username).join().get();
+        Assert.assertTrue(! updatedHost.equals(originalHost));
+
+        // login again through other server
+        ensureSignedUp(username, password, getNode(iNode2), crypto);
+        FileWrapper afterRotation = getNode(iNode2).getFile(cap2, context.username).join().get();
     }
 }

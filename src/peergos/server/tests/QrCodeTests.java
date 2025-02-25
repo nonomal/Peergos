@@ -5,8 +5,8 @@ import peergos.server.*;
 import peergos.shared.*;
 import peergos.shared.crypto.hash.*;
 import peergos.shared.fingerprint.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.util.*;
 import peergos.shared.zxing.*;
 import peergos.shared.zxing.common.*;
@@ -22,6 +22,31 @@ import java.util.*;
 public class QrCodeTests {
 
     private static final Crypto crypto = Main.initCrypto();
+
+    @Test
+    public void testSecretLinkQRCode() throws Exception {
+        String originalText = "http://too.cool:8000/for/school.html";
+        SecretLinkQRCode link = SecretLinkQRCode.generate(originalText);
+        byte[] bytes = link.getQrCodeData();
+
+        File file = new File("secret-link-qr-code.png");
+        try(FileOutputStream fos = new FileOutputStream(file);
+            BufferedOutputStream bos = new BufferedOutputStream(fos)) {
+            bos.write(bytes);
+        }
+        BufferedImage bufferedImage = ImageIO.read(file);
+        int width = bufferedImage.getWidth();
+        int height = bufferedImage.getHeight();
+        int i=0;
+        int[] result = new int[width * height];
+        for (int row = 0; row < height; row++) {
+            for (int col = 0; col < width; col++) {
+                result[i++] = bufferedImage.getRGB(col, row);
+            }
+        }
+        String text = SecretLinkQRCode.decodeFromPixels(result, bufferedImage.getWidth(), bufferedImage.getHeight());
+        Assert.assertTrue("Round trip perfect scan", text.equals(originalText));
+    }
 
     @Test
     public void invertable() throws Exception {

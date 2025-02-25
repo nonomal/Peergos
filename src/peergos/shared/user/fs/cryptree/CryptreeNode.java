@@ -7,8 +7,8 @@ import peergos.shared.crypto.hash.*;
 import peergos.shared.crypto.random.*;
 import peergos.shared.crypto.symmetric.*;
 import peergos.shared.inode.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.*;
 import peergos.shared.storage.auth.*;
 import peergos.shared.user.*;
@@ -60,7 +60,7 @@ public class CryptreeNode implements Cborable {
 
     private transient final MaybeMultihash lastCommittedHash;
     private transient final boolean isDirectory;
-    private final List<BatId> bats;
+    public final List<BatId> bats;
     private final PaddedCipherText fromBaseKey;
     private final FragmentedPaddedCipherText childrenOrData;
     private final PaddedCipherText fromParentKey;
@@ -183,9 +183,9 @@ public class CryptreeNode implements Cborable {
         }
 
         public CompletableFuture<List<Cid>> commitChildrenLinks(WritableAbsoluteCapability us,
-                                                                      Optional<SigningPrivateKeyAndPublicHash> entryWriter,
-                                                                      NetworkAccess network,
-                                                                      TransactionId tid) {
+                                                                Optional<SigningPrivateKeyAndPublicHash> entryWriter,
+                                                                NetworkAccess network,
+                                                                TransactionId tid) {
             SigningPrivateKeyAndPublicHash signer = dir.getSigner(us.rBaseKey, us.wBaseKey.get(), entryWriter);
             return commitChildrenLinks(us, signer, network, tid);
         }
@@ -365,8 +365,9 @@ public class CryptreeNode implements Cborable {
                                                                          Snapshot version) {
         return getDirectChildrenCapabilities(us, version, network)
                 .thenCompose(c -> network.retrieveAllMetadata(c.stream()
-                        .map(n -> n.cap)
-                        .collect(Collectors.toList()), version)
+                                .map(n -> n.cap)
+                                .collect(Collectors.toList()), version)
+                        .thenApply(p -> p.left)
                         .thenApply(HashSet::new));
     }
 
@@ -443,6 +444,74 @@ public class CryptreeNode implements Cborable {
                 network.dhtClient);
     }
 
+    public CompletableFuture<Snapshot> addMirrorBat(Snapshot base,
+                                                    Committer committer,
+                                                    WritableAbsoluteCapability us,
+                                                    Optional<SigningPrivateKeyAndPublicHash> entryWriter,
+                                                    Optional<byte[]> streamSecret,
+                                                    BatId mirrorBat,
+                                                    boolean addToUs,
+                                                    NetworkAccess network) {
+
+        List<BatId> ourBats;
+        if (addToUs) {
+            List<BatId> newBats = new ArrayList<>(bats);
+            if (newBats.size() != 1)
+                throw new IllegalStateException("Can't add mirror bat unless chunk has exactly 1 BAT!");
+            newBats.add(mirrorBat);
+            ourBats = newBats;
+        } else
+            ourBats = bats;
+        SigningPrivateKeyAndPublicHash signer = getSigner(us.rBaseKey, us.wBaseKey.get(), entryWriter);
+        List<Cid> fragments = childrenOrData.getFragments();
+        return addMirrorBatToFragments(mirrorBat, fragments, childrenOrData.getBats(), us.owner, signer, network)
+                .thenCompose(frags -> frags.equals(fragments) && ourBats.equals(bats) ? Futures.of(base) : IpfsTransaction.call(us.owner,
+                                tid -> network.uploadChunk(base, committer, new CryptreeNode(lastCommittedHash, isDirectory,
+                                        ourBats, fromBaseKey, childrenOrData.withFragments(frags),
+                                        fromParentKey), us.owner, us.getMapKey(), signer, tid),
+                                network.dhtClient)
+                        .thenCompose(s -> getNextChunk(s, us, network, streamSecret, network.hasher)
+                                .thenCompose(next -> {
+                                    if (next.isPresent()) {
+                                        return next.get().fileAccess.addMirrorBat(s, committer, (WritableAbsoluteCapability) next.get().capability,
+                                                entryWriter, streamSecret, mirrorBat, addToUs, network);
+                                    }
+                                    return Futures.of(s);
+                                }))
+                );
+    }
+
+    private CompletableFuture<List<Cid>> addMirrorBatToFragments(BatId mirrorBat,
+                                                                 List<Cid> fragments,
+                                                                 List<BatWithId> bats,
+                                                                 PublicKeyHash owner,
+                                                                 SigningPrivateKeyAndPublicHash signer,
+                                                                 NetworkAccess network) {
+        if (fragments.isEmpty())
+            return Futures.of(fragments);
+        if (bats.isEmpty()) // don't add mirror bat unless fragments already have an inline bat
+            return Futures.of(fragments);
+
+        return network.dhtClient.downloadFragments(owner, fragments, bats, network.hasher, x -> {}, 1.0)
+                .thenCompose(frags -> {
+                    if (frags.size() != bats.size())
+                        throw new IllegalStateException("Couldn't download all chunk fragments!");
+                    List<BatId> rawBlockBats = Bat.getRawBlockBats(frags.get(0).fragment.data);
+                    int nBats = rawBlockBats.size();
+                    if (nBats == 1) {
+                        List<Fragment> withMirrorBat = frags.stream()
+                                .map(f -> new Fragment(addMirrorBat(f.fragment.data, bats.get(fragments.indexOf(f.hash.get())).bat, mirrorBat)))
+                                .collect(Collectors.toList());
+                        return IpfsTransaction.call(owner, tid -> network.uploadFragments(withMirrorBat, owner, signer, x -> {}, tid), network.dhtClient);
+                    }
+                    return Futures.of(fragments);
+                });
+    }
+
+    private byte[] addMirrorBat(byte[] existing, Bat inlineBat, BatId mirrorBatId) {
+        return ArrayOps.concat(Bat.createRawBlockPrefix(inlineBat, Optional.of(mirrorBatId)), Bat.removeRawBlockBatPrefix(existing));
+    }
+
     public boolean isDirty(SymmetricKey baseKey) {
         if (isDirectory())
             return false;
@@ -451,6 +520,14 @@ public class CryptreeNode implements Cborable {
 
     public CryptreeNode withHash(Multihash hash) {
         return new CryptreeNode(MaybeMultihash.of(hash), isDirectory, bats, fromBaseKey, childrenOrData, fromParentKey);
+    }
+
+    public CryptreeNode withMirrorBat(BatId mirrorBatId) {
+        if (bats.size() != 1)
+            throw new IllegalStateException("Can only add a mirror BAT to a cryptree node with 1 BAT.");
+        ArrayList<BatId> newBats = new ArrayList<>(bats);
+        newBats.add(mirrorBatId);
+        return new CryptreeNode(lastCommittedHash, isDirectory, newBats, fromBaseKey, childrenOrData, fromParentKey);
     }
 
     public CryptreeNode withWriterLink(SymmetricKey baseKey, SymmetricLinkToSigner newWriterLink) {
@@ -535,7 +612,7 @@ public class CryptreeNode implements Cborable {
     public CompletableFuture<Optional<RetrievedCapability>> getNextChunk(Snapshot version,
                                                                          AbsoluteCapability nextChunkCap,
                                                                          NetworkAccess network) {
-        return network.getMetadata(version.get(nextChunkCap.writer).props, nextChunkCap)
+        return network.getMetadata(version.get(nextChunkCap.writer).props.get(), nextChunkCap)
                 .thenApply(faOpt -> faOpt.map(fa -> new RetrievedCapability(nextChunkCap, fa)));
     }
 
@@ -592,21 +669,20 @@ public class CryptreeNode implements Cborable {
             NetworkAccess network,
             Snapshot version,
             Committer committer) {
-        byte[] signature = parentSigner.secret.signMessage(newSignerPair.publicSigningKey.serialize());
-        return IpfsTransaction.call(owner,
+        return parentSigner.secret.signMessage(newSignerPair.publicSigningKey.serialize()).thenCompose(signature -> IpfsTransaction.call(owner,
                 tid -> network.dhtClient.putSigningKey(signature, owner, parentSigner.publicKeyHash,
-                        newSignerPair.publicSigningKey, tid)
+                                newSignerPair.publicSigningKey, tid)
                         .thenCompose(newSignerHash -> {
                             SigningPrivateKeyAndPublicHash newSigner =
                                     new SigningPrivateKeyAndPublicHash(newSignerHash, newSignerPair.secretSigningKey);
                             CommittedWriterData cwd = version.get(parentSigner);
-                            OwnerProof proof = OwnerProof.build(newSigner, parentSigner.publicKeyHash);
-                            return cwd.props.addOwnedKeyAndCommit(owner, parentSigner, proof, cwd.hash, cwd.sequence, network, tid)
+                            return OwnerProof.build(newSigner, parentSigner.publicKeyHash)
+                                    .thenCompose(proof -> cwd.props.get().addOwnedKeyAndCommit(owner, parentSigner, proof, cwd.hash, cwd.sequence, network, committer, tid))
                                     .thenCompose(v -> WriterData.createEmpty(owner, newSigner, network.dhtClient,
-                                            network.hasher, tid)
-                                            .thenCompose(wd -> committer.commit(owner, newSigner, wd, new CommittedWriterData(MaybeMultihash.empty(), null, Optional.empty()), tid))
+                                                    network.hasher, tid)
+                                            .thenCompose(wd -> committer.commit(owner, newSigner, wd, new CommittedWriterData(MaybeMultihash.empty(), Optional.empty(), Optional.empty()), tid))
                                             .thenApply(s -> new Pair<>(version.mergeAndOverwriteWith(v).mergeAndOverwriteWith(s), newSigner)));
-                        }), network.dhtClient);
+                        }), network.dhtClient));
     }
 
     public static CompletableFuture<Snapshot> deAuthoriseSigner(
@@ -618,9 +694,11 @@ public class CryptreeNode implements Cborable {
             Committer committer) {
         PublicKeyHash parentWriter = parentSigner.publicKeyHash;
         CommittedWriterData cwd = version.get(parentSigner);
-        return IpfsTransaction.call(owner, tid -> cwd.props.removeOwnedKey(owner, parentSigner, signer,
+        return IpfsTransaction.call(owner, tid -> cwd.props.get().removeOwnedKey(owner, parentSigner, signer,
                 network.dhtClient, network.hasher)
-                .thenCompose(wd -> committer.commit(owner, parentSigner, wd, cwd, tid)), network.dhtClient)
+                .thenCompose(wd -> wd.equals(cwd.props.get()) ?
+                        Futures.of(version) :
+                        committer.commit(owner, parentSigner, wd, cwd, tid)), network.dhtClient)
                 .thenApply(committed -> version.withVersion(parentWriter, committed.get(parentWriter)));
     }
 
@@ -804,7 +882,7 @@ public class CryptreeNode implements Cborable {
 
                         return retriever(cap.rBaseKey, streamSecret, cap.getMapKey(), cap.bat, crypto.hasher)
                                 .thenCompose(retriever ->
-                                        retriever.getFile(current.get(writer).props, network, crypto, cap, streamSecret, props.size, committedHash(), x -> {})
+                                        retriever.getFile(current.get(writer).props.get(), network, crypto, cap, streamSecret, props.size, committedHash(), 1, x -> {})
                                                 .thenCompose(data -> {
                                                     int chunkSize = (int) Math.min(props.size, Chunk.MAX_SIZE);
                                                     byte[] chunkData = new byte[chunkSize];
@@ -822,7 +900,7 @@ public class CryptreeNode implements Cborable {
                                                                         getWriterLink(cap.rBaseKey), mirrorBatId(),
                                                                         crypto.random, crypto.hasher, network, x -> {});
                                                             });
-                                                }).thenCompose(updated -> network.getMetadata(updated.get(nextCap.writer).props, nextCap)
+                                                }).thenCompose(updated -> network.getMetadata(updated.get(nextCap.writer).props.get(), nextCap)
                                                 .thenCompose(mOpt -> {
                                                     if (!mOpt.isPresent())
                                                         return CompletableFuture.completedFuture(updated);
@@ -888,7 +966,7 @@ public class CryptreeNode implements Cborable {
                                                         return IpfsTransaction.call(us.owner,
                                                                 tid -> next.commit(newBase, committer, nextPointer, signer, network, tid)
                                                                         .thenCompose(updatedBase ->
-                                                                                network.getMetadata(updatedBase.get(nextPointer.writer).props, nextPointer)
+                                                                                network.getMetadata(updatedBase.get(nextPointer.writer).props.get(), nextPointer)
                                                                                         .thenCompose(nextOpt -> nextOpt.get().
                                                                                                 addChildrenAndCommit(updatedBase, committer, remaining,
                                                                                                         nextPointer, signer, mirrorBat, network, crypto)))
@@ -935,7 +1013,7 @@ public class CryptreeNode implements Cborable {
         LocalDateTime timestamp = LocalDateTime.now();
         return CryptreeNode.createEmptyDir(MaybeMultihash.empty(), dirReadKey, dirWriteKey, Optional.empty(),
                 new FileProperties(name, true, false, "", 0, timestamp, timestamp, isSystemFolder,
-                        Optional.empty(), Optional.empty()), Optional.of(ourCap), SymmetricKey.random(), nextChunk, dirBat, mirrorBat, crypto.random, crypto.hasher)
+                        Optional.empty(), Optional.empty(), Optional.empty()), Optional.of(ourCap), SymmetricKey.random(), nextChunk, dirBat, mirrorBat, crypto.random, crypto.hasher)
                 .thenCompose(child -> {
 
                     SymmetricLink toChildWriteKey = SymmetricLink.fromPair(us.wBaseKey.get(), dirWriteKey);
@@ -1047,16 +1125,38 @@ public class CryptreeNode implements Cborable {
         Set<Location> locsToRemove = childrenToRemove.stream()
                 .map(r -> r.getLocation())
                 .collect(Collectors.toSet());
-        return getDirectChildren(network, ourPointer, current).thenCompose(children -> {
-            List<NamedRelativeCapability> withRemoval = children.stream()
-                    .filter(e -> ! locsToRemove.contains(e.capability.getLocation()))
-                    .map(c -> new NamedRelativeCapability(new PathElement(c.getProperties().name), ourPointer.relativise(c.capability)))
+        return getDirectChildrenCapabilities(ourPointer, current, network).thenCompose(childCaps -> {
+            List<NamedRelativeCapability> withRemoval = childCaps.stream()
+                    .filter(e -> ! locsToRemove.contains(e.cap.getLocation()))
+                    .map(c -> new NamedRelativeCapability(new PathElement(c.name.name), ourPointer.relativise(c.cap)))
+                    .collect(Collectors.toList());
+            Set<Location> kidLocs = childCaps.stream()
+                    .map(r -> r.cap.getLocation())
+                    .collect(Collectors.toSet());
+
+            List<AbsoluteCapability> remaining = childrenToRemove.stream()
+                    .filter(c -> ! kidLocs.contains(c.getLocation()))
                     .collect(Collectors.toList());
 
             return IpfsTransaction.call(ourPointer.owner,
                     tid -> withChildren(ourPointer.rBaseKey, new ChildrenLinks(withRemoval), random, hasher)
                             .thenCompose(d -> d.commit(current, committer, ourPointer, entryWriter, network, tid)),
-                    network.dhtClient);
+                    network.dhtClient).thenCompose(s -> {
+                        if (remaining.isEmpty())
+                            return Futures.of(s);
+                        return getNextChunkLocation(ourPointer.rBaseKey, Optional.empty(), ourPointer.getMapKey(), ourPointer.bat, hasher)
+                                .thenCompose(nextLoc -> {
+                                    SigningPrivateKeyAndPublicHash signer = getSigner(ourPointer.rBaseKey, ourPointer.wBaseKey.get(), entryWriter);
+                                    WritableAbsoluteCapability nextChunkCap = ourPointer.withMapKey(nextLoc.left, nextLoc.right);
+                                    return getNextChunk(s, nextChunkCap, network)
+                                            .thenCompose(next -> {
+                                                if (next.isEmpty())
+                                                    throw new IllegalStateException("No subsequent dir chunk");
+                                                RetrievedCapability rc = next.get();
+                                                return rc.fileAccess.removeChildren(s, committer, remaining, nextChunkCap, Optional.of(signer), network, random, hasher);
+                                            });
+                                });
+            });
         });
     }
 

@@ -1,12 +1,14 @@
 
 package peergos.shared.corenode;
+import java.time.*;
 import java.util.logging.*;
 
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.*;
 import peergos.shared.crypto.hash.*;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.io.ipfs.api.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.storage.*;
 import peergos.shared.storage.auth.*;
 import peergos.shared.user.*;
 import peergos.shared.util.*;
@@ -17,7 +19,10 @@ import java.util.concurrent.*;
 import java.util.stream.*;
 
 public class HTTPCoreNode implements CoreNode {
-	private static final Logger LOG = Logger.getGlobal();
+	private static final Logger LOG = Logger.getLogger(HTTPCoreNode.class.getName());
+    public static void disableLog() {
+        LOG.setLevel(Level.OFF);
+    }
 	private static final String P2P_PROXY_PROTOCOL = "/http";
 
     private final HttpPoster poster;
@@ -157,6 +162,61 @@ public class HTTPCoreNode implements CoreNode {
     }
 
     @Override
+    public CompletableFuture<Either<PaymentProperties, RequiredDifficulty>> startPaidSignup(String username, UserPublicKeyLink chain, ProofOfWork proof) {
+        try {
+            ByteArrayOutputStream bout = new ByteArrayOutputStream();
+            DataOutputStream dout = new DataOutputStream(bout);
+
+            Serialize.serialize(username, dout);
+            Serialize.serialize(chain.serialize(), dout);
+            Serialize.serialize(proof.serialize(), dout);
+            dout.flush();
+
+            return poster.postUnzip(urlPrefix + Constants.CORE_URL + "startPaidSignup", bout.toByteArray())
+                    .thenApply(res -> {
+                        DataInputStream din = new DataInputStream(new ByteArrayInputStream(res));
+                        try {
+                            boolean success = din.readBoolean();
+                            if (success) {
+                                return Either.a(PaymentProperties.fromCbor(CborObject.fromByteArray(Serialize.deserializeByteArray(din, 1024))));
+                            }
+                            return Either.b(new RequiredDifficulty(din.readInt()));
+                        } catch (IOException e) {
+                            throw new RuntimeException(e);
+                        }
+                    });
+        } catch (IOException ioe) {
+            LOG.log(Level.WARNING, ioe.getMessage(), ioe);
+            return Futures.errored(ioe);
+        }
+    }
+
+    @Override
+    public CompletableFuture<PaymentProperties> completePaidSignup(String username,
+                                                                   UserPublicKeyLink chain,
+                                                                   OpLog setupOperations,
+                                                                   byte[] signedspaceRequest,
+                                                                   ProofOfWork proof) {
+        try {
+            ByteArrayOutputStream bout = new ByteArrayOutputStream();
+            DataOutputStream dout = new DataOutputStream(bout);
+
+            Serialize.serialize(username, dout);
+            Serialize.serialize(chain.serialize(), dout);
+            Serialize.serialize(setupOperations.serialize(), dout);
+            Serialize.serialize(proof.serialize(), dout);
+            Serialize.serialize(signedspaceRequest, dout);
+            dout.flush();
+
+            return poster.postUnzip(urlPrefix + Constants.CORE_URL + "completePaidSignup", bout.toByteArray())
+                    .thenApply(res -> PaymentProperties.fromCbor(CborObject.fromByteArray(res)));
+        } catch (IOException ioe) {
+            LOG.log(Level.WARNING, ioe.getMessage(), ioe);
+            return Futures.errored(ioe);
+        }
+    }
+
+    @Override
     public CompletableFuture<Optional<RequiredDifficulty>> updateChain(String username,
                                                                        List<UserPublicKeyLink> chain,
                                                                        ProofOfWork proof,
@@ -199,7 +259,9 @@ public class HTTPCoreNode implements CoreNode {
     public CompletableFuture<UserSnapshot> migrateUser(String username,
                                                        List<UserPublicKeyLink> newChain,
                                                        Multihash currentStorageId,
-                                                       Optional<BatWithId> mirrorBat) {
+                                                       Optional<BatWithId> mirrorBat,
+                                                       LocalDateTime latestLinkCountUpdate,
+                                                       long currentUsage) {
         String modifiedPrefix = urlPrefix.isEmpty() ? "" : getProxyUrlPrefix(currentStorageId);
         try {
             ByteArrayOutputStream bout = new ByteArrayOutputStream();
@@ -211,6 +273,8 @@ public class HTTPCoreNode implements CoreNode {
             dout.writeBoolean(mirrorBat.isPresent());
             if (mirrorBat.isPresent())
                 Serialize.serialize(mirrorBat.get().serialize(), dout);
+            dout.writeLong(latestLinkCountUpdate.toEpochSecond(ZoneOffset.UTC));
+            dout.writeLong(currentUsage);
             dout.flush();
 
             return poster.postUnzip(modifiedPrefix + Constants.CORE_URL + "migrateUser", bout.toByteArray(), -1)
@@ -219,6 +283,11 @@ public class HTTPCoreNode implements CoreNode {
             LOG.log(Level.WARNING, ioe.getMessage(), ioe);
             return Futures.errored(ioe);
         }
+    }
+
+    @Override
+    public CompletableFuture<Optional<Multihash>> getNextServerId(Multihash serverId) {
+        throw new IllegalStateException("getNextServerId cannot be called remotely!");
     }
 
     @Override public void close() {}

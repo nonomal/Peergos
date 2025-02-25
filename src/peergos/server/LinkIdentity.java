@@ -5,8 +5,7 @@ import peergos.shared.*;
 import peergos.shared.crypto.asymmetric.*;
 import peergos.shared.crypto.hash.*;
 import peergos.shared.crypto.symmetric.*;
-import peergos.shared.io.ipfs.multibase.*;
-import peergos.shared.storage.auth.*;
+import peergos.shared.io.ipfs.bases.*;
 import peergos.shared.user.*;
 import peergos.shared.user.fs.*;
 import peergos.shared.util.*;
@@ -29,7 +28,7 @@ public class LinkIdentity {
         String username = a.getArg("username");
         Console console = System.console();
         String password = new String(console.readPassword("Enter password for " + username + ":"));
-        UserContext context = UserContext.signIn(username, password, network, crypto).join();
+        UserContext context = UserContext.signIn(username, password, Main::getMfaResponseCLI, network, crypto).join();
         String usernameB = a.getArg("service-username");
         String serviceB = a.getArg("service");
         if (! Pattern.compile(IdentityLink.KnownService.Peergos.usernameRegex).matcher(username).matches())
@@ -41,7 +40,7 @@ public class LinkIdentity {
         boolean encrypted = a.getBoolean("encrypted");
         boolean publish = ! encrypted && a.getBoolean("publish", false);
 
-        IdentityLinkProof proof = IdentityLinkProof.buildAndSign(context.signer, username, usernameB, serviceB);
+        IdentityLinkProof proof = IdentityLinkProof.buildAndSign(context.signer, username, usernameB, serviceB).join();
         if (encrypted)
             proof = proof.withKey(SymmetricKey.random());
 
@@ -83,11 +82,11 @@ public class LinkIdentity {
         Optional<PublicKeyHash> idKeyHash = network.coreNode.getPublicKeyHash(username).join();
         if (idKeyHash.isEmpty())
             throw new IllegalStateException("Unknown user: " + username);
-        Optional<PublicSigningKey> idKey = network.dhtClient.getSigningKey(idKeyHash.get()).join();
+        Optional<PublicSigningKey> idKey = network.dhtClient.getSigningKey(idKeyHash.get(), idKeyHash.get()).join();
         if (idKey.isEmpty())
             throw new IllegalStateException("Couldn't retrieve key for " + username);
 
-        proof.isValid(idKey.get());
+        proof.isValid(idKey.get()).join();
         System.out.println("Identity link proof is correct - it was signed by the Peergos user " + username);
     }
 }

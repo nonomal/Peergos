@@ -167,9 +167,9 @@ public class ChatController {
     }
 
     public CompletableFuture<ChatController> join(SigningPrivateKeyAndPublicHash identity) {
-        OwnerProof chatId = OwnerProof.build(identity, privateChatState.chatIdentity.publicKeyHash);
-        return applyAndCommit(chat -> chat.join(state.host(), chatId, privateChatState.chatIdPublic, identity, store,
-                context.network.dhtClient, context.crypto), context.username);
+        return OwnerProof.build(identity, privateChatState.chatIdentity.publicKeyHash)
+                .thenCompose(chatId -> applyAndCommit(chat -> chat.join(state.host(), chatId, privateChatState.chatIdPublic,
+                        identity, store, context.network.dhtClient, context.crypto), context.username));
     }
 
     @JsMethod
@@ -213,7 +213,7 @@ public class ChatController {
                         .thenApply(Optional::get),
                 t -> context.getByPath(PathUtil.get(mirrorUsername).resolve(sourcePath.subpath(1, sourcePath.getNameCount())).toString(), v)
                         .thenApply(Optional::get))
-                .thenCompose(f -> f.getInputStream(f.version.get(f.writer()).props, context.network, context.crypto, x -> {})
+                .thenCompose(f -> f.getInputStream(f.version.get(f.writer()).props.get(), context.network, context.crypto, x -> {})
                         .thenCompose(r -> dir.uploadFileSection(v, c, f.getName(), r, false, 0, f.getSize(),
                                 Optional.empty(), false, false, false, context.network, context.crypto, x -> {},
                                 context.crypto.random.randomBytes(RelativeCapability.MAP_KEY_LENGTH), Optional.empty(),

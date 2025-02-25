@@ -4,14 +4,15 @@ import peergos.shared.*;
 import peergos.shared.cbor.*;
 import peergos.shared.corenode.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multibase.binary.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
+import peergos.shared.io.ipfs.bases.Base32;
 import peergos.shared.storage.auth.*;
 import peergos.shared.user.*;
 import peergos.shared.user.fs.*;
 import peergos.shared.util.*;
 
+import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.logging.*;
@@ -19,12 +20,14 @@ import java.util.stream.*;
 
 public class DirectS3BlockStore implements ContentAddressedStorage {
 
+    public static final int MAX_SMALL_BLOCK_SIZE = 100 * 1024;
+
     private final boolean directWrites, publicReads, authedReads;
     private final Optional<String> basePublicReadUrl;
     private final Optional<String> baseAuthedUrl;
     private final HttpPoster direct;
     private final ContentAddressedStorage fallback;
-    private final Cid nodeId;
+    private final List<Cid> nodeIds;
     private final LRUCache<PublicKeyHash, Multihash> storageNodeByOwner = new LRUCache<>(100);
     private final CoreNode core;
     private final Hasher hasher;
@@ -32,7 +35,7 @@ public class DirectS3BlockStore implements ContentAddressedStorage {
     public DirectS3BlockStore(BlockStoreProperties blockStoreProperties,
                               HttpPoster direct,
                               ContentAddressedStorage fallback,
-                              Cid nodeId,
+                              List<Cid> nodeIds,
                               CoreNode core,
                               Hasher hasher) {
         this.directWrites = blockStoreProperties.directWrites;
@@ -42,7 +45,7 @@ public class DirectS3BlockStore implements ContentAddressedStorage {
         this.baseAuthedUrl = blockStoreProperties.baseAuthedUrl;
         this.direct = direct;
         this.fallback = fallback;
-        this.nodeId = nodeId;
+        this.nodeIds = nodeIds;
         this.core = core;
         this.hasher = hasher;
     }
@@ -50,6 +53,11 @@ public class DirectS3BlockStore implements ContentAddressedStorage {
     @Override
     public CompletableFuture<BlockStoreProperties> blockStoreProperties() {
         return Futures.of(new BlockStoreProperties(directWrites, publicReads, authedReads, basePublicReadUrl, baseAuthedUrl));
+    }
+
+    @Override
+    public CompletableFuture<String> linkHost(PublicKeyHash owner) {
+        return fallback.linkHost(owner);
     }
 
     @Override
@@ -72,7 +80,12 @@ public class DirectS3BlockStore implements ContentAddressedStorage {
 
     @Override
     public CompletableFuture<Cid> id() {
-        return Futures.of(nodeId);
+        return Futures.of(nodeIds.get(nodeIds.size() - 1));
+    }
+
+    @Override
+    public CompletableFuture<List<Cid>> ids() {
+        return Futures.of(nodeIds);
     }
 
     @Override
@@ -91,31 +104,13 @@ public class DirectS3BlockStore implements ContentAddressedStorage {
                                             List<byte[]> signedHashes,
                                             List<byte[]> blocks,
                                             TransactionId tid) {
-        return onOwnersNode(owner).thenCompose(ownersNode -> {
-            if (ownersNode && directWrites) {
-                CompletableFuture<List<Cid>> res = new CompletableFuture<>();
-                fallback.authWrites(owner, writer, signedHashes, blocks.stream().map(x -> x.length).collect(Collectors.toList()), false, tid)
-                        .thenCompose(preAuthed -> {
-                            List<CompletableFuture<Cid>> futures = new ArrayList<>();
-                            for (int i = 0; i < blocks.size(); i++) {
-                                PresignedUrl url = preAuthed.get(i);
-                                Cid targetName = keyToHash(url.base.substring(url.base.lastIndexOf("/") + 1));
-                                futures.add(direct.put(url.base, blocks.get(i), url.fields)
-                                        .thenApply(x -> targetName));
-                            }
-                            return Futures.combineAllInOrder(futures);
-                        }).thenApply(res::complete)
-                        .exceptionally(res::completeExceptionally);
-                return res;
-            }
-            return fallback.put(owner, writer, signedHashes, blocks, tid);
-        });
+        return fallback.put(owner, writer, signedHashes, blocks, tid);
     }
 
     private CompletableFuture<Boolean> onOwnersNode(PublicKeyHash owner) {
         Multihash cached = storageNodeByOwner.get(owner);
         if (cached != null)
-            return Futures.of(cached.equals(nodeId));
+            return Futures.of(nodeIds.stream().map(Cid::bareMultihash).anyMatch(p -> p.equals(cached)));
         return core.getUsername(owner)
                 .thenCompose(user -> core.getChain(user)
                         .thenApply(chain -> {
@@ -123,9 +118,9 @@ public class DirectS3BlockStore implements ContentAddressedStorage {
                                 throw new IllegalStateException("Empty chain returned for " + user);
                             List<Multihash> storageProviders = chain.get(chain.size() - 1).claim.storageProviders;
                             Multihash mainNode = storageProviders.get(0);
-                            storageNodeByOwner.put(owner, mainNode);
-                            Logger.getGlobal().info("Are we on owner's node? " + mainNode + " == " + nodeId);
-                            return mainNode.equals(nodeId);
+                            storageNodeByOwner.put(owner, mainNode.bareMultihash());
+                            Logger.getGlobal().info("Are we on owner's node? " + mainNode + " in " + nodeIds);
+                            return nodeIds.stream().map(Cid::bareMultihash).anyMatch(p -> p.equals(mainNode.bareMultihash()));
                         }));
     }
 
@@ -136,6 +131,10 @@ public class DirectS3BlockStore implements ContentAddressedStorage {
                                                List<byte[]> blocks,
                                                TransactionId tid,
                                                ProgressConsumer<Long> progressCounter) {
+        //  raw blocks smaller than 100 KiB are written directly to server rather than S3 (if S3 blockstore)
+        // otherwise we suffer disproportionally from latency to S3 from the client
+        if (blocks.stream().allMatch(b -> b.length < MAX_SMALL_BLOCK_SIZE))
+            return fallback.putRaw(owner, writer, signatures, blocks, tid, progressCounter);
         return onOwnersNode(owner).thenCompose(ownersNode -> {
             if (ownersNode && directWrites) {
                 // we have a trade-off here. The first block upload cannot start until the auth call returns.
@@ -168,14 +167,17 @@ public class DirectS3BlockStore implements ContentAddressedStorage {
                                                     TransactionId tid,
                                                     ProgressConsumer<Long> progressCounter) {
         CompletableFuture<List<Cid>> res = new CompletableFuture<>();
-        fallback.authWrites(owner, writer, signatures, blocks.stream().map(x -> x.length).collect(Collectors.toList()), true, tid)
+        List<Integer> sizes = blocks.stream().map(x -> x.length).collect(Collectors.toList());
+        List<List<BatId>> batIds = blocks.stream().map(Bat::getRawBlockBats).collect(Collectors.toList());
+        fallback.authWrites(owner, writer, signatures, sizes, batIds, true, tid)
                 .thenCompose(preAuthed -> {
                     List<CompletableFuture<Cid>> futures = new ArrayList<>();
                     for (int i = 0; i < blocks.size(); i++) {
                         PresignedUrl url = preAuthed.get(i);
                         Cid targetName = keyToHash(url.base.substring(url.base.lastIndexOf("/") + 1));
                         Long size = (long) blocks.get(i).length;
-                        futures.add(direct.put(url.base, blocks.get(i), url.fields)
+                        int finalI = i;
+                        futures.add(RetryStorage.runWithRetry(3, () -> direct.put(url.base, blocks.get(finalI), url.fields))
                                 .thenApply(x -> {
                                     progressCounter.accept(size);
                                     return targetName;
@@ -195,11 +197,11 @@ public class DirectS3BlockStore implements ContentAddressedStorage {
                                                                        ProgressConsumer<Long> monitor,
                                                                        double spaceIncreaseFactor) {
         if (publicReads || ! authedReads)
-            return NetworkAccess.downloadFragments(hashes, bats, fallback, h, monitor, spaceIncreaseFactor);
+            return NetworkAccess.downloadFragments(owner, hashes, bats, fallback, h, monitor, spaceIncreaseFactor);
 
         return onOwnersNode(owner).thenCompose(onOwners -> {
             if (! onOwners)
-                return NetworkAccess.downloadFragments(hashes, bats, fallback, h, monitor, spaceIncreaseFactor);
+                return NetworkAccess.downloadFragments(owner, hashes, bats, fallback, h, monitor, spaceIncreaseFactor);
 
             // Do a bulk auth in a single call
             List<Pair<Integer, Cid>> indexAndHash = IntStream.range(0, hashes.size())
@@ -245,7 +247,7 @@ public class DirectS3BlockStore implements ContentAddressedStorage {
                         return Arrays.asList(res);
                     }).thenAccept(allResults::complete)
                     .exceptionally(t -> {
-                        NetworkAccess.downloadFragments(hashes, bats, this, h, monitor, spaceIncreaseFactor)
+                        NetworkAccess.downloadFragments(owner, hashes, bats, this, h, monitor, spaceIncreaseFactor)
                                 .thenAccept(allResults::complete)
                                 .exceptionally(e -> {
                                     allResults.completeExceptionally(e);
@@ -258,12 +260,12 @@ public class DirectS3BlockStore implements ContentAddressedStorage {
     }
 
     @Override
-    public CompletableFuture<Optional<CborObject>> get(Cid hash, Optional<BatWithId> bat) {
-        return getRaw(hash, bat).thenApply(opt -> opt.map(CborObject::fromByteArray));
+    public CompletableFuture<Optional<CborObject>> get(PublicKeyHash owner, Cid hash, Optional<BatWithId> bat) {
+        return getRaw(owner, hash, bat).thenApply(opt -> opt.map(CborObject::fromByteArray));
     }
 
     @Override
-    public CompletableFuture<Optional<byte[]>> getRaw(Cid hash, Optional<BatWithId> bat) {
+    public CompletableFuture<Optional<byte[]>> getRaw(PublicKeyHash owner, Cid hash, Optional<BatWithId> bat) {
         if (hash.isIdentity())
                 return CompletableFuture.completedFuture(Optional.of(hash.getHash()));
         if (publicReads) {
@@ -277,7 +279,7 @@ public class DirectS3BlockStore implements ContentAddressedStorage {
                                 .thenApply(Optional::of)
                                 .thenAccept(res::complete)
                                 .exceptionally(e -> {
-                                    fallback.getRaw(hash, bat)
+                                    fallback.getRaw(owner, hash, bat)
                                             .thenAccept(res::complete)
                                             .exceptionally(f -> {
                                                 res.completeExceptionally(f);
@@ -289,14 +291,15 @@ public class DirectS3BlockStore implements ContentAddressedStorage {
                     });
             return res;
         }
-        if (authedReads) {
+        if (authedReads && hash.isRaw()) {
             CompletableFuture<Optional<byte[]>> res = new CompletableFuture<>();
             fallback.authReads(Arrays.asList(new MirrorCap(hash, bat)))
                     .thenCompose(preAuthedGet -> direct.get(preAuthedGet.get(0).base, preAuthedGet.get(0).fields))
                     .thenApply(Optional::of)
+                    .thenApply(opt -> opt.filter(b -> b.length > 0))
                     .thenAccept(res::complete)
                     .exceptionally(t -> {
-                        fallback.getRaw(hash, bat)
+                        fallback.getRaw(owner, hash, bat)
                                 .thenAccept(res::complete)
                                 .exceptionally(e -> {
                                     res.completeExceptionally(e);
@@ -306,7 +309,7 @@ public class DirectS3BlockStore implements ContentAddressedStorage {
                     });
             return res;
         }
-        return fallback.getRaw(hash, bat);
+        return fallback.getRaw(owner, hash, bat);
     }
 
     @Override
@@ -315,13 +318,28 @@ public class DirectS3BlockStore implements ContentAddressedStorage {
     }
 
     @Override
-    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat) {
+    public CompletableFuture<IpnsEntry> getIpnsEntry(Multihash signer) {
+        return fallback.getIpnsEntry(signer);
+    }
+
+    @Override
+    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat, Optional<Cid> committedRoot) {
         return Futures.asyncExceptionally(
-                () -> fallback.getChampLookup(owner, root, champKey, bat),
+                () -> fallback.getChampLookup(owner, root, champKey, bat, committedRoot),
                 t -> {
                     if (!(t instanceof RateLimitException))
                         return Futures.errored(t);
-                    return getChampLookup(root, champKey, bat, hasher);
+                    return getChampLookup(owner, root, champKey, bat, committedRoot, hasher);
                 });
+    }
+
+    @Override
+    public CompletableFuture<EncryptedCapability> getSecretLink(SecretLink link) {
+        return fallback.getSecretLink(link);
+    }
+
+    @Override
+    public CompletableFuture<LinkCounts> getLinkCounts(String owner, LocalDateTime after, BatWithId mirrorBat) {
+        return fallback.getLinkCounts(owner, after, mirrorBat);
     }
 }

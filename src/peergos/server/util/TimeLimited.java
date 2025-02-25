@@ -20,7 +20,7 @@ public class TimeLimited {
      */
     public static long isAllowedTime(byte[] signedTime, int durationSeconds, ContentAddressedStorage ipfs, PublicKeyHash owner) {
         try {
-            Optional<PublicSigningKey> ownerOpt = ipfs.getSigningKey(owner).join();
+            Optional<PublicSigningKey> ownerOpt = ipfs.getSigningKey(owner, owner).join();
             if (! ownerOpt.isPresent())
                 throw new IllegalStateException("Couldn't retrieve owner key!");
             return isAllowedTime(signedTime, durationSeconds, ownerOpt.get());
@@ -30,7 +30,7 @@ public class TimeLimited {
     }
 
     public static long isAllowedTime(byte[] signedTime, int durationSeconds, PublicSigningKey pubKey) {
-        byte[] raw = pubKey.unsignMessage(signedTime);
+        byte[] raw = pubKey.unsignMessage(signedTime).join();
         CborObject cbor = CborObject.fromByteArray(raw);
         if (! (cbor instanceof CborObject.CborLong))
             throw new IllegalStateException("Invalid cbor for time in authorisation!");
@@ -53,10 +53,10 @@ public class TimeLimited {
      */
     public static long isAllowed(String expectedPath, byte[] signedReq, int durationSeconds, ContentAddressedStorage ipfs, PublicKeyHash owner) {
         try {
-            Optional<PublicSigningKey> ownerOpt = ipfs.getSigningKey(owner).join();
+            Optional<PublicSigningKey> ownerOpt = ipfs.getSigningKey(owner, owner).join();
             if (! ownerOpt.isPresent())
                 throw new IllegalStateException("Couldn't retrieve owner key!");
-            byte[] raw = ownerOpt.get().unsignMessage(signedReq);
+            byte[] raw = ownerOpt.get().unsignMessage(signedReq).join();
             CborObject cbor = CborObject.fromByteArray(raw);
 
             TimeLimitedClient.SignedRequest req = TimeLimitedClient.SignedRequest.fromCbor(cbor);

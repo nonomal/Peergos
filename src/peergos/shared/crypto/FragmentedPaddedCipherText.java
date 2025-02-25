@@ -5,7 +5,7 @@ import peergos.shared.cbor.*;
 import peergos.shared.crypto.hash.*;
 import peergos.shared.crypto.random.*;
 import peergos.shared.crypto.symmetric.*;
-import peergos.shared.io.ipfs.cid.*;
+import peergos.shared.io.ipfs.Cid;
 import peergos.shared.storage.auth.*;
 import peergos.shared.user.fs.*;
 import peergos.shared.util.*;
@@ -39,6 +39,22 @@ public class FragmentedPaddedCipherText implements Cborable {
         this.inlinedCipherText = inlinedCipherText;
         if (inlinedCipherText.isPresent() && ! cipherTextFragments.isEmpty())
             throw new IllegalStateException("Cannot have an inlined block and merkle linked blocks!");
+    }
+
+    public boolean isInline() {
+        return inlinedCipherText.isPresent();
+    }
+
+    public List<Cid> getFragments() {
+        return cipherTextFragments;
+    }
+
+    public List<BatWithId> getBats() {
+        return bats;
+    }
+
+    public FragmentedPaddedCipherText withFragments(List<Cid> fragments) {
+        return new FragmentedPaddedCipherText(nonce, header, fragments, bats, inlinedCipherText);
     }
 
     @Override

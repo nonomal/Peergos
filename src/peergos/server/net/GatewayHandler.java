@@ -12,6 +12,7 @@ import peergos.shared.util.*;
 import java.io.*;
 import java.nio.file.*;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.*;
 
 public class GatewayHandler implements HttpHandler {
@@ -204,7 +205,7 @@ public class GatewayHandler implements HttpHandler {
         httpExchange.getResponseHeaders().set("permissions-policy", "interest-cohort=()");
 
         if (size < MAX_ASSET_SIZE_CACHE) {
-            byte[] body = Serialize.readFully(reader, size).join();
+            byte[] body = Serialize.readFully(reader, size).orTimeout(15, TimeUnit.SECONDS).join();
             addContentType(httpExchange, path, props, body);
             httpExchange.sendResponseHeaders(200, size);
             OutputStream resp = httpExchange.getResponseBody();
@@ -219,7 +220,7 @@ public class GatewayHandler implements HttpHandler {
         byte[] buf = buffer.get();
         int read;
         long offset = 0;
-        while ((read = reader.readIntoArray(buf, 0, (int) Math.min(size - offset, buf.length)).join()) >= 0) {
+        while (offset < size && (read = reader.readIntoArray(buf, 0, (int) Math.min(size - offset, buf.length)).orTimeout(15, TimeUnit.SECONDS).join()) >= 0) {
             resp.write(buf, 0, read);
             offset += read;
         }
@@ -250,6 +251,8 @@ public class GatewayHandler implements HttpHandler {
             httpExchange.getResponseHeaders().set("Content-Type", "application/xml");
         else if (start!= null && start.length > 15 && Arrays.equals("<!DOCTYPE html>".getBytes(), Arrays.copyOfRange(start, 0, 15)))
             httpExchange.getResponseHeaders().set("Content-Type", "text/html");
+        else
+            httpExchange.getResponseHeaders().set("Content-Type", props.mimeType);
     }
 
     private void serve404(HttpExchange httpExchange, FileWrapper webroot) throws IOException {

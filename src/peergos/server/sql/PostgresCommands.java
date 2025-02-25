@@ -3,6 +3,11 @@ package peergos.server.sql;
 public class PostgresCommands implements SqlSupplier {
 
     @Override
+    public String vacuumCommand() {
+        return "";
+    }
+
+    @Override
     public String listTablesCommand() {
         return "SELECT tablename FROM pg_catalog.pg_tables " +
                 "WHERE schemaname != 'pg_catalog' AND schemaname != 'information_schema';";
@@ -14,14 +19,29 @@ public class PostgresCommands implements SqlSupplier {
     }
 
     @Override
+    public String addMetadataCommand() {
+        return "INSERT INTO blockmetadata (cid, version, size, links, batids) VALUES(?, ?, ?, ?, ?) ON CONFLICT DO NOTHING;";
+    }
+
+    @Override
     public String createFollowRequestsTableCommand() {
         return "CREATE TABLE IF NOT EXISTS followrequests (id serial primary key, " +
                 "name text not null, followrequest text not null);";
     }
 
     @Override
+    public String ensureColumnExistsCommand(String table, String column, String type) {
+        return "ALTER TABLE " + table + " ADD COLUMN IF NOT EXISTS " + column + " " + type + ";";
+    }
+
+    @Override
     public String insertTransactionCommand() {
-        return "INSERT INTO transactions (tid, owner, hash) VALUES(?, ?, ?) ON CONFLICT DO NOTHING;";
+        return "INSERT INTO transactions (tid, owner, hash, time) VALUES(?, ?, ?, ?) ON CONFLICT DO NOTHING;";
+    }
+
+    @Override
+    public String insertServerIdCommand() {
+        return "INSERT INTO serverids (peerid, record) VALUES(?, ?) ON CONFLICT DO NOTHING;";
     }
 
     @Override

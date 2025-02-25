@@ -4,13 +4,15 @@ import peergos.shared.*;
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Multihash;
+import peergos.shared.storage.*;
 import peergos.shared.storage.auth.*;
 import peergos.shared.user.*;
 import peergos.shared.user.fs.*;
 import peergos.shared.util.*;
 
 import java.io.*;
+import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 
@@ -73,7 +75,9 @@ public class TofuCoreNode implements CoreNode {
     private synchronized CompletableFuture<Boolean> commit() {
         byte[] data = tofu.serialize();
         AsyncReader.ArrayBacked dataReader = new AsyncReader.ArrayBacked(data);
-        return backingFile.overwriteFile(dataReader, data.length, network, crypto, x -> {})
+        return network.synchronizer.applyComplexUpdate(backingFile.owner(), backingFile.signingPair(),
+                        (s, committer) -> backingFile.overwriteFile(dataReader, data.length, network, crypto, x -> {}, s, committer))
+                .thenCompose(v -> backingFile.getUpdated(v, network))
                 .thenApply(f -> {
                     this.backingFile = f;
                     return true;
@@ -141,6 +145,16 @@ public class TofuCoreNode implements CoreNode {
     }
 
     @Override
+    public CompletableFuture<Either<PaymentProperties, RequiredDifficulty>> startPaidSignup(String username, UserPublicKeyLink chain, ProofOfWork proof) {
+        throw new IllegalStateException("Unsupported operation!");
+    }
+
+    @Override
+    public CompletableFuture<PaymentProperties> completePaidSignup(String username, UserPublicKeyLink chain, OpLog setupOperations, byte[] signedSpaceRequest, ProofOfWork proof) {
+        throw new IllegalStateException("Unsupported operation!");
+    }
+
+    @Override
     public CompletableFuture<Optional<RequiredDifficulty>> updateChain(String username,
                                                                        List<UserPublicKeyLink> chain,
                                                                        ProofOfWork proof,
@@ -163,12 +177,19 @@ public class TofuCoreNode implements CoreNode {
     public CompletableFuture<UserSnapshot> migrateUser(String username,
                                                        List<UserPublicKeyLink> newChain,
                                                        Multihash currentStorageId,
-                                                       Optional<BatWithId> mirrorBat) {
-        return source.migrateUser(username, newChain, currentStorageId, mirrorBat)
+                                                       Optional<BatWithId> mirrorBat,
+                                                       LocalDateTime latestLinkCountUpdate,
+                                                       long currentUsage) {
+        return source.migrateUser(username, newChain, currentStorageId, mirrorBat, latestLinkCountUpdate, currentUsage)
                 .thenCompose(res -> source.getChain(username)
                         .thenCompose(chain -> tofu.updateChain(username, chain, network.dhtClient)
                                 .thenCompose(x -> commit())
                                 .thenApply(x -> res)));
+    }
+
+    @Override
+    public CompletableFuture<Optional<Multihash>> getNextServerId(Multihash serverId) {
+        return source.getNextServerId(serverId);
     }
 
     @Override

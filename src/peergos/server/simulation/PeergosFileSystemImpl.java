@@ -6,6 +6,7 @@ import peergos.shared.user.fs.*;
 import peergos.shared.user.fs.transaction.*;
 import peergos.shared.util.*;
 
+import java.io.FileNotFoundException;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.*;
@@ -44,8 +45,14 @@ public class PeergosFileSystemImpl implements FileSystem {
         FileWrapper wrapper = getPath(path);
         long size = wrapper.getFileProperties().size;
         ProgressConsumer<Long> monitor = (readBytes) -> progressConsumer.accept(readBytes, size);
-        AsyncReader in = wrapper.getInputStream(userContext.network, userContext.crypto, size, monitor).join();
+        AsyncReader in = wrapper.getInputStream(userContext.network, userContext.crypto, size, 1, monitor).join();
         return Serialize.readFully(in, size).join();
+    }
+
+    @Override
+    public AsyncReader reader(Path path) throws FileNotFoundException {
+        FileWrapper file = getPath(path);
+        return file.getInputStream(userContext.network, userContext.crypto, x -> {}).join();
     }
 
     @Override
@@ -54,7 +61,7 @@ public class PeergosFileSystemImpl implements FileSystem {
         AsyncReader resetableFileInputStream = new AsyncReader.ArrayBacked(data);
         String fileName = path.getFileName().toString();
         ProgressConsumer<Long> pc  = l -> progressConsumer.accept(l);
-        FileWrapper fileWrapper = directory.uploadFileJS(fileName, resetableFileInputStream, (int)(data.length >> 32), (int) data.length,
+        FileWrapper fileWrapper = directory.uploadFileJS(fileName, resetableFileInputStream, 0, data.length,
                 true, userContext.mirrorBatId(), userContext.network, userContext.crypto, pc, userContext.getTransactionService(), f -> Futures.of(false)).join();
     }
 

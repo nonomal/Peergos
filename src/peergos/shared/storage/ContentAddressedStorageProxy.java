@@ -2,27 +2,34 @@ package peergos.shared.storage;
 
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.hash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.io.ipfs.api.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multiaddr.*;
-import peergos.shared.io.ipfs.multihash.*;
 import peergos.shared.storage.auth.*;
 import peergos.shared.user.*;
+import peergos.shared.user.fs.*;
 import peergos.shared.util.*;
 
 import java.io.*;
 import java.net.*;
+import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.stream.*;
 
 public interface ContentAddressedStorageProxy {
 
+    CompletableFuture<String> linkHost(Multihash targetServerId, PublicKeyHash owner);
+
     CompletableFuture<TransactionId> startTransaction(Multihash targetServerId, PublicKeyHash owner);
 
     CompletableFuture<Boolean> closeTransaction(Multihash targetServerId, PublicKeyHash owner, TransactionId tid);
 
     CompletableFuture<List<byte[]>> getChampLookup(Multihash targetServerId, PublicKeyHash owner, Multihash root, byte[] champKey, Optional<BatWithId> bat);
+
+    CompletableFuture<EncryptedCapability> getSecretLink(Multihash targetServerId, SecretLink link);
+
+    CompletableFuture<LinkCounts> getLinkCounts(Multihash targetServerId, String owner, LocalDateTime after, BatWithId mirrorBat);
 
     CompletableFuture<List<Cid>> put(Multihash targetServerId,
                                      PublicKeyHash owner,
@@ -70,6 +77,14 @@ public interface ContentAddressedStorageProxy {
         }
 
         @Override
+        public CompletableFuture<String> linkHost(Multihash targetServerId,
+                                                  PublicKeyHash owner) {
+            return poster.get(getProxyUrlPrefix(targetServerId) + apiPrefix
+                            + ContentAddressedStorage.HTTP.LINK_HOST + "?owner=" + encode(owner.toString()))
+                    .thenApply(raw -> new String(raw));
+        }
+
+        @Override
         public CompletableFuture<TransactionId> startTransaction(Multihash targetServerId,
                                                                  PublicKeyHash owner) {
             return poster.get(getProxyUrlPrefix(targetServerId) + apiPrefix
@@ -103,13 +118,36 @@ public interface ContentAddressedStorageProxy {
         }
 
         @Override
+        public CompletableFuture<EncryptedCapability> getSecretLink(Multihash targetServerId,
+                                                                    SecretLink link) {
+            return poster.get(getProxyUrlPrefix(targetServerId) + apiPrefix
+                    + "link/get?label=" + link.labelString()
+                    + "&owner=" + encode(link.owner.toString()))
+                    .thenApply(CborObject::fromByteArray)
+                    .thenApply(EncryptedCapability::fromCbor);
+        }
+
+        @Override
+        public CompletableFuture<LinkCounts> getLinkCounts(Multihash targetServerId,
+                                                           String owner,
+                                                           LocalDateTime after,
+                                                           BatWithId mirrorBat) {
+            return poster.get(getProxyUrlPrefix(targetServerId) + apiPrefix
+                    + "link/counts?after=" + after.toEpochSecond(ZoneOffset.UTC)
+                    + "?bat=" + mirrorBat.encode()
+                    + "&owner=" + owner)
+                    .thenApply(CborObject::fromByteArray)
+                    .thenApply(LinkCounts::fromCbor);
+        }
+
+        @Override
         public CompletableFuture<List<Cid>> put(Multihash targetServerId,
                                                 PublicKeyHash owner,
                                                 PublicKeyHash writer,
                                                 List<byte[]> signatures,
                                                 List<byte[]> blocks,
                                                 TransactionId tid) {
-            return put(targetServerId, owner, writer, signatures, blocks, "cbor", tid);
+            return put(targetServerId, owner, writer, signatures, blocks, "dag-cbor", tid);
         }
 
         @Override

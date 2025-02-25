@@ -33,9 +33,9 @@ public class SmallFileBenchmark {
     private static NetworkAccess buildHttpNetworkAccess(boolean useIpfs, Random r) throws Exception {
         Args args = UserTests.buildArgs().with("useIPFS", "" + useIpfs);
         Main.PKI_INIT.main(args);
-        NetworkAccess base = Builder.buildJavaNetworkAccess(new URL("http://localhost:" + args.getInt("port")), false).get();
+        NetworkAccess base = Builder.buildJavaNetworkAccess(new URL("http://localhost:" + args.getInt("port")), false, Optional.empty()).get();
         int delayMillis = 50;
-        return DelayingStorage.buildNetwork(base, delayMillis, delayMillis);
+        return base.withStorage(s -> new DelayingStorage(s, delayMillis, delayMillis));
     }
 
     @Parameterized.Parameters()
@@ -72,7 +72,7 @@ public class SmallFileBenchmark {
             progressReceived.add(num);
         };
         List<FileWrapper.FileUploadProperties> files = names.stream()
-                .map(n -> new FileWrapper.FileUploadProperties(n, AsyncReader.build(data), 0, data.length, false, false, progressCounter))
+                .map(n -> new FileWrapper.FileUploadProperties(n, () -> AsyncReader.build(data), 0, data.length, Optional.empty(), Optional.empty(), false, false, progressCounter))
                 .collect(Collectors.toList());
         userRoot.uploadSubtree(Stream.of(new FileWrapper.FolderUploadProperties(Collections.emptyList(), files)),
                 userRoot.mirrorBatId(), context.network, crypto, context.getTransactionService(), f -> Futures.of(false), () -> true).join();

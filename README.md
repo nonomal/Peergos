@@ -7,9 +7,9 @@ Peergos
 
 Peergos is building the next web - the private web, where end users are in control. Imagine web apps being secure by default and unable to track you. Imagine being able to control exactly what personal data each web app can see. Imagine never having to log in to an app ever again. You own your data and decide where it is stored and who can see it. At Peergos, we believe that privacy is a fundamental human right and we want to make it easy for everyone to interact online in ways that respect this right.
 
-The foundation of Peergos is a peer-to-peer encrypted global filesystem with fine-grained access control designed to be resistant to surveillance of data content or friendship graphs. It will have a secure messenger, with optional interoperability with email, and a totally private and secure social network, where users are in control of who sees what (executed cryptographically). Our motto at Peergos is, "Control your data, control your destiny."
+The foundation of Peergos is a peer-to-peer encrypted global filesystem with fine-grained access control designed to be resistant to surveillance of data content or friendship graphs. It has a secure messenger, an encrypted email client and bridge, and a totally private and secure social network, where users are in control of who sees what (executed cryptographically). Our motto at Peergos is, "Control your data, control your destiny."
 
-The name Peergos comes from the Greek word Πύργος (Pyrgos), which means stronghold or tower, but phonetically spelt with the nice connection to being peer-to-peer. Pronuniation: peer-goss (as in gossip).
+The name Peergos comes from the Greek word Πύργος (Pyrgos), which means stronghold or tower, but phonetically spelt with the nice connection to being peer-to-peer. Pronunciation: peer-goss (as in gossip).
 
 Screenshots
 ----
@@ -29,9 +29,38 @@ Tech book
 ---------
 You can read more detail about our features and architecture in our [tech book](https://book.peergos.org).
 
+Recent progress
+---------
+To see recent developments read the latest [release notes](https://peergos.net/public/peergos/releases) or see our [web-ui repo releases](https://github.com/Peergos/web-ui/releases).
+
 Media
 ---------
 The slides of a talk introducing Peergos are [here](https://speakerdeck.com/ianopolous/peergos-architecture) 
+
+Deep dive at IPFS Camp 2024
+
+[![IPFS Camp 2024](https://img.youtube.com/vi/yDU4GHsEo34/0.jpg)](https://www.youtube.com/watch?v=yDU4GHsEo34)
+
+Deep dive at Devstaff Crete:
+
+[![Deep dive](https://img.youtube.com/vi/Po_fdZYcfXo/0.jpg)](https://www.youtube.com/watch?v=Po_fdZYcfXo)
+
+Overview at IPFS Thing:
+
+[![Overview](https://img.youtube.com/vi/g1vzoZjG9Zo/0.jpg)](https://www.youtube.com/watch?v=g1vzoZjG9Zo)
+
+[![Architecture details](https://img.youtube.com/vi/HVyrVUI2-RA/0.jpg)](https://www.youtube.com/watch?v=HVyrVUI2-RA)
+
+Applications on Peergos:
+
+[![Overview](https://img.youtube.com/vi/3i1TtknNw2E/0.jpg)](https://www.youtube.com/watch?v=3i1TtknNw2E)
+
+[![A better web: secure, private p2p apps with user owned data and identity](https://img.youtube.com/vi/mSElk2jcFqY/0.jpg)](https://www.youtube.com/watch?v=mSElk2jcFqY)
+
+Applications deep dive:
+
+[![Overview](https://img.youtube.com/vi/oberD75GU8I/0.jpg)](https://www.youtube.com/watch?v=oberD75GU8I)
+
 
 Architecture talk at IPFS Lab Day:
 
@@ -56,9 +85,16 @@ or a
 
 [larger or one off donation](https://donorbox.org/peergos). 
 
-Audit
+Audits
 -----
-Cure53 conducted an audit of Peergos in June 2019. The final report is [here](https://cure53.de/pentest-report_peergos.pdf).
+### 2024
+https://peergos.org/posts/security-audit-2024
+
+### 2019
+https://peergos.org/posts/security-audit
+
+### All audit reports
+https://github.com/Peergos/Peergos/tree/master/audits
 
 Chat room
 ---------
@@ -68,7 +104,7 @@ Peergos aims
 ------------
  - To allow individuals to securely and privately store files in a peer to peer network which has no central node and is generally difficult to disrupt or surveil
  - To allow secure sharing of files with other users of the network without visible meta-data (who shares with who)
- - Allow web apps to be loaded and run durectly from Peergos in a sandbox that prevents data exfiltration and with user granted permissions
+ - Allow web apps to be loaded and run directly from Peergos in a sandbox that prevents data exfiltration and with user granted permissions
  - To have a beautiful user interface that any computer or mobile user can understand
  - To be independent of the central TLS Certificate Authority trust architecture
  - Self hostable - A user should be able to easily run Peergos on a machine in their home and get their own Peergos storage space, and social communication platform from it. 
@@ -89,8 +125,8 @@ Architecture
  - 6: Sharing - Secure cryptographic sharing of files with friends.
 
 2.0 Language
- - The IPFS layer is currently coded in Go - we have a minimal ipfs replacement - [ipfs-nucleau](https://github.com/peergos/ipfs-nucleus)
- - The server is coded to run on JVM to get portability and speed, predominantly Java
+ - The IPFS layer is coded in Java - we have a minimal ipfs implementation - [Nabu](https://github.com/peergos/nabu)
+ - The Peergos server is coded to run on JVM to get portability and speed, predominantly Java
  - The web interface is mostly coded in Java and cross compiled to Javascript, with the exception of the Tweetnacl and scrypt libraries, and a small amount of GUI code in JS for Vue.js. 
  - Apps are written in HTML5
 
@@ -101,14 +137,14 @@ Architecture
 4.0 Trust
  - New versions of the software will be delivered through Peergos itself. (Able to be turned off by the user if desired)
  - A user who trusts a public Peergos server (and the SSL Certificate authority chain) can use the web interface over TLS
- - A less trusting user can run a Peergos server on their own machine and use the web interface over localhost
- - A more paranoid user can run a Peergos server on their own machine and use the CLI or the fuse binding
+ - A less trusting user can run a Peergos server/rpoxy on their own machine and use the web interface over localhost
+ - A more paranoid user can run a Peergos server on their own machine and use the CLI or the fuse/webdav binding
  - Servers are trustless - your data and metadata cannot be exposed even if your server is compromised (assuming your client is not compromised)
  - IPFS itself is not trusted and all data stored or retrieved from it is self-certifying. 
  - The data store (which may not be ipfs directly, but S3 compatible service for example) is also not trusted
 
 4.0 Logging in
- - A user's username is used along with a random salt and the hash of their password and run through scrypt (with parameters 17, 8, 1, 96, though users can choose harder parameters if desired) to generate a symmetric key and a signing keypair. The signing keypiar is then used to auth and retrieve encrypted login data. This login data is then decrypted using the symmetric key to obtain the identity key pair, social keypair and root directory capability. This means that a user can log in from any machine without transfering any keys, and also that their keys are protected from a brute force attack (see slides mentioned above for a cost estimate).
+ - A user's username is used along with a random salt and the hash of their password and run through scrypt (with parameters 17, 8, 1, 96, though users can choose harder parameters if desired) to generate a symmetric key and a signing keypair. The signing keypair is then used to auth and retrieve encrypted login data. This login data is then decrypted using the symmetric key to obtain the identity key pair, social keypair and root directory capability. This means that a user can log in from any machine without transferring any keys, and also that their keys are protected from a brute force attack (see slides mentioned above for a cost estimate).
 
 5.0 Encryption
  - private keys never leave client node, two random symmetric keys are generated for every file or directory (explicitly not convergent encryption, which leaks information)
@@ -134,12 +170,16 @@ Use this method to login to a peergos account on another instance without any re
 
 1. Download a release from https://peergos.net/public/peergos/releases
 
-2. Install Java - You will need Java >= 11 installed (Java 17 is best). 
+2. If you download the jar, install Java - You will need Java >= 21 installed. 
 
 3. Run Peergos with:
 
 ```
 java -jar Peergos.jar daemon
+```
+or for the native packages:
+```
+peergos daemon
 ```
 All the peergos data will be stored in ~/.peergos by default, which can be overridden with the environment var or arg - PEERGOS_PATH. 
 
@@ -153,12 +193,20 @@ Use this method to run a new home-server (which is best with a publicly routable
 
 1. Download a release from https://peergos.net/public/peergos/releases
 
-2. Install Java - You will need Java >= 11 installed (Java 17 is best). 
+2. Install Java - You will need Java >= 21 installed. 
 
 3. Run Peergos with:
 ```
 java -jar Peergos.jar daemon -generate-token true
 ```
+
+4. Ensure you can listen on a public IP address
+
+   Some cloud hosts don't add your public ip to the network interfaces by default. For these cases you may need to run something like
+```bash
+   sudo ip address add MY.PUBLIC.IP dev eth0
+```
+
 All the peergos data will be stored in ~/.peergos by default, which can be overridden with the environment var or arg - PEERGOS_PATH
 
 You can then access the web interface and signup via the localhost address printed, which includes a single use signup token.
@@ -176,9 +224,9 @@ If you don't set up a domain name and TLS you can still log in to your account f
 If you are also using a reverse proxy like nginx to terminate TLS you will need to tell peergos which domain you are using with the following arg:
 > -public-domain $YOUR_DOMAIN
 
-And the TLS certificate will also need to cover the wildcard subdomain for the applications (like the PDF viewer, text editor, calendar, and custom 3rd party apps) to work. For example, it should cover peergos.net and *.peergos.net
+And the TLS certificate will also need to cover the wildcard subdomain for the applications (like the PDF viewer, text editor, calendar, and custom 3rd party apps) to work. For example, it should have A records that cover $YOUR_DOMAIN and *.$YOUR_DOMAIN
 
-If you are using a reverse proxy like nginx to terminate TLS here is a good example of the nginx config file (replace $YOUR_DOMAIN_NAME):
+If you are using a reverse proxy like nginx to terminate TLS here is a good example of the nginx config file (replace $YOUR_DOMAIN_NAME) (On SELinux enabled Linux distributions you need to make sure to allow nginx to access port 8000 tcp_socket.):
 ```
 # Peergos server config
 
@@ -213,7 +261,7 @@ server {
         client_max_body_size 2M;
 
         location / {
-                proxy_pass http://localhost:8000;
+                proxy_pass http://127.0.0.1:8000;
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header Host $http_host;
                 allow all;
@@ -241,6 +289,7 @@ Follow the instructions for self hosting but add the following parameters (eithe
 -s3.region.endpoint $ENDPOINT (e.g. us-east-1.linodeobjects.com)
 -s3.secretKey #SECRET_KEY
 ```
+N.B. Minio seems to have some issues, so with Minio use: -authed-s3-reads false -direct-s3-writes false
 
 You will also need to set the cors.xml for the bucket to the following:
 ```
@@ -269,6 +318,12 @@ Follow the instructions for self hosting but add the following parameters (eithe
 -postgres.password $PASSWORD
 -postgres.username $USERNAME
 ```
+
+Usage - troubleshooting
+-----
+* You can run with "-log-to-console true" to also show any logging on the console. 
+* The very first run will sync the pki and this takes several minutes. Subsequent runs should start within seconds. 
+
 
 ### CLI
 There are a range of commands available from a command line. You can run -help to find the available commands or details on any command or sub-command. Most users should only need the *daemon* and *shell* commands, and maybe *identity* or *fuse*. You can use the *migrate* command to move all your data to a new server (where the command is run). 
@@ -299,34 +354,15 @@ Sub commands:
 	verify: Verify an identity link post from another service.
 ```
 
-FUSE (native folder mounting of Peergos)
---------
-You can mount your Peergos space with the following command
-```
->> java -Djava.library.path=native-lib -jar Peergos.jar fuse -peergos-url https://peergos.net -username $username -password $password
-```
-
-### MacOS FUSE prerequisites
-Install osxfuse with
-```
->> brew install --cask osxfuse
-```
-
-### Windows FUSE prerequisites
-Install winfsp with
-```
->> choco install winfsp
-```
-
 Mirror
 --------
 To mirror all of your data on another server first run the following command (on any instance):
 > java -jar Peergos.jar mirror init -username $username
 
-It will ask for your password and then print two parameters you need to supply to the mirror daemon.
+It will ask for your password and then print three parameters you need to supply to the mirror daemon.
 
 Then run daemon, on the instance you want to mirror your data, with the following additional args provided by the init command.
-> -mirror.username $username -mirror.bat $mirrorBat -login-keypair $loginKeypair
+> java -jar Peergos.jar daemon -mirror.username $username -mirror.bat $mirrorBat -login-keypair $loginKeypair
 
 This will then continuously mirror that user's data on this instance. 
 
@@ -365,19 +401,62 @@ To show all available commands
 demo@https://peergos.net > help
 ```
 
-Hint: The following command might be useful to do a initial upload for larger folders.
+Hint: The following command might be useful to do an initial upload for larger folders.
 ```shell
 put local_path remote_path 
 ```
 
+Sync
+-----
+There is a bi-directional sync client that will let you sync a native directory with a peergos directory (or several pairs of directories). To set this up first run:
+```
+>> java -jar Peergos.jar sync init -peergos-url https://peergos.net
+```
+And follow the prompts to enter your username, password and the peergos dir you want to sync with. This will output something like:
+```
+>> Run the sync dir command with the following args: -links secret/z59vuwzfFDomTEuyeEw7rkofcd2vt5EnVffmAy5fnQe9V9MG36ZiBVY/3615659421#QUq6mf4gz8uk -local-dirs $LOCAL_DIR
+```
+
+Then to run the sync client with:
+```
+>> java -jar Peergos.jar sync dir -peergos-url https://peergos.net -links secret/z59vuwzfFDomTEuyeEw7rkofcd2vt5EnVffmAy5fnQe9V9MG36ZiBVY/3615659421#QUq6mf4gz8uk -local-dirs /path/to/local/dir
+```
+
+FUSE (native folder mounting of Peergos)
+--------
+You can mount your Peergos space with the following command
+```
+>> java -Djava.library.path=native-lib -jar Peergos.jar fuse -peergos-url https://peergos.net -username $username -password $password
+```
+
+### MacOS FUSE prerequisites
+Install osxfuse with
+```
+>> brew install --cask osxfuse
+```
+
+### Windows FUSE prerequisites
+Install winfsp with
+```
+>> choco install winfsp
+```
+
+Webdav
+------
+You can run a local webdav bridge which allows you to access your Peergos files with any webdav compatible client. Run the following command (choose an arbitrary webdav username and password): 
+```
+>> java -Djava.library.path=native-lib -jar Peergos.jar webdav -peergos-url https://peergos.net -username $username -PEERGOS_PASSWORD $password -webdav.username $webdav-username -PEERGOS_WEBDAV_PASSWORD $webdav-password
+```
+You can then browse to your home directory with http://localhost:8090/$YOUR-USERNAME
+
 Development
 --------
 ### Dependencies
-Requires jdk11 and ant to build. Use the following to install dependencies:
+Requires jdk17 and ant to build. Use the following to install dependencies:
 #### On debian
 ```shell
 sudo apt-get install ant
-sudo apt-get install openjdk-11-jdk
+sudo apt-get install openjdk-17-jdk
 ```
 #### On macOS
 ```shell

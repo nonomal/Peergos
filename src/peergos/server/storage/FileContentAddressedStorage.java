@@ -3,17 +3,19 @@ package peergos.server.storage;
 import peergos.server.storage.auth.*;
 import peergos.server.util.Logging;
 import peergos.shared.cbor.*;
+import peergos.shared.corenode.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.*;
 import peergos.shared.storage.auth.*;
+import peergos.shared.user.fs.*;
 import peergos.shared.util.*;
 
 import java.io.*;
-import java.nio.channels.*;
 import java.nio.file.*;
 import java.nio.file.attribute.*;
+import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.*;
@@ -26,7 +28,6 @@ import java.util.stream.*;
 public class FileContentAddressedStorage implements DeletableContentAddressedStorage {
     private static final Logger LOG = Logging.LOG();
     private static final int CID_V1 = 1;
-    private static final int DIRECTORY_DEPTH = 5;
     private final Path root;
     private final TransactionStore transactions;
     private final BlockRequestAuthoriser authoriser;
@@ -48,6 +49,9 @@ public class FileContentAddressedStorage implements DeletableContentAddressedSto
     }
 
     @Override
+    public void setPki(CoreNode pki) {}
+
+    @Override
     public ContentAddressedStorage directToOrigin() {
         return this;
     }
@@ -55,6 +59,16 @@ public class FileContentAddressedStorage implements DeletableContentAddressedSto
     @Override
     public CompletableFuture<Cid> id() {
         return CompletableFuture.completedFuture(new Cid(1, Cid.Codec.LibP2pKey, Multihash.Type.sha2_256, RAMStorage.hash("FileStorage".getBytes())));
+    }
+
+    @Override
+    public CompletableFuture<List<Cid>> ids() {
+        return CompletableFuture.completedFuture(List.of(new Cid(1, Cid.Codec.LibP2pKey, Multihash.Type.sha2_256, RAMStorage.hash("FileStorage".getBytes()))));
+    }
+
+    @Override
+    public CompletableFuture<String> linkHost(PublicKeyHash owner) {
+        return Futures.of("localhost:8000");
     }
 
     @Override
@@ -69,15 +83,20 @@ public class FileContentAddressedStorage implements DeletableContentAddressedSto
     }
 
     @Override
-    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat) {
+    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat, Optional<Cid> committedRoot) {
         if (! hasBlock(root))
             return Futures.errored(new IllegalStateException("Champ root not present locally: " + root));
-        return getChampLookup(root, champKey, bat, hasher);
+        return getChampLookup(owner, root, champKey, bat, committedRoot, hasher);
     }
 
     @Override
-    public List<Multihash> getOpenTransactionBlocks() {
+    public List<Cid> getOpenTransactionBlocks() {
         return transactions.getOpenTransactionBlocks();
+    }
+
+    @Override
+    public void clearOldTransactions(long cutoffMillis) {
+        transactions.clearOldTransactions(cutoffMillis);
     }
 
     @Override
@@ -110,15 +129,12 @@ public class FileContentAddressedStorage implements DeletableContentAddressedSto
                 .collect(Collectors.toList()));
     }
 
-    private Path getFilePath(Cid h) {
-        String name = h.toString();
+    private static Path getFilePath(Cid h) {
+        String key = DirectS3BlockStore.hashToKey(h);
 
-        int depth = DIRECTORY_DEPTH;
-        Path path = PathUtil.get("");
-        for (int i=0; i < depth; i++)
-            path = path.resolve(Character.toString(name.charAt(i)));
-        // include full name in filename
-        path = path.resolve(name);
+        Path path = PathUtil.get("")
+                .resolve(key.substring(key.length() - 3, key.length() - 1))
+                .resolve(key + ".data");
         return path;
     }
 
@@ -130,28 +146,29 @@ public class FileContentAddressedStorage implements DeletableContentAddressedSto
     }
 
     @Override
-    public CompletableFuture<Optional<CborObject>> get(Cid hash, String auth) {
+    public CompletableFuture<Optional<CborObject>> get(List<Multihash> peerIds, Cid hash, String auth, boolean persistBlock) {
         if (hash.codec == Cid.Codec.Raw)
             throw new IllegalStateException("Need to call getRaw if cid is not cbor!");
-        return getRaw(hash, auth).thenApply(opt -> opt.map(CborObject::fromByteArray));
+        return getRaw(Collections.emptyList(), hash, auth, persistBlock).thenApply(opt -> opt.map(CborObject::fromByteArray));
     }
 
     @Override
-    public CompletableFuture<Optional<CborObject>> get(Cid hash, Optional<BatWithId> bat) {
-        return get(hash, bat, id().join(), hasher);
+    public CompletableFuture<Optional<CborObject>> get(PublicKeyHash owner, Cid hash, Optional<BatWithId> bat) {
+        return get(Collections.emptyList(), hash, bat, id().join(), hasher, false);
     }
 
     @Override
-    public CompletableFuture<Optional<byte[]>> getRaw(Cid hash, Optional<BatWithId> bat) {
-        return getRaw(hash, bat, id().join(), hasher);
+    public CompletableFuture<Optional<byte[]>> getRaw(PublicKeyHash owner, Cid hash, Optional<BatWithId> bat) {
+        return getRaw(Collections.emptyList(), hash, bat, id().join(), hasher, false);
     }
 
     @Override
-    public CompletableFuture<Optional<byte[]>> getRaw(Cid hash, String auth) {
-        return getRaw(hash, auth, true);
+    public CompletableFuture<Optional<byte[]>> getRaw(List<Multihash> peerIds, Cid hash, String auth, boolean persistBlock) {
+        return getRaw(peerIds, hash, auth, true, persistBlock);
     }
 
-    private CompletableFuture<Optional<byte[]>> getRaw(Cid hash, String auth, boolean doAuth) {
+    @Override
+    public CompletableFuture<Optional<byte[]>> getRaw(List<Multihash> peerIds, Cid hash, String auth, boolean doAuth, boolean persistBlock) {
         try {
             if (hash.isIdentity())
                 return Futures.of(Optional.of(hash.getHash()));
@@ -179,10 +196,15 @@ public class FileContentAddressedStorage implements DeletableContentAddressedSto
     }
 
     @Override
-    public CompletableFuture<List<Cid>> getLinks(Cid root, String auth) {
+    public List<List<Cid>> bulkGetLinks(List<Multihash> peerIds, List<Want> wants) {
+        throw new IllegalStateException("Unimplemented!");
+    }
+
+    @Override
+    public CompletableFuture<List<Cid>> getLinks(Cid root) {
         if (root.codec == Cid.Codec.Raw)
             return CompletableFuture.completedFuture(Collections.emptyList());
-        return getRaw(root, auth, false)
+        return getRaw(Collections.emptyList(), root, "", false, false)
                 .thenApply(opt -> opt.map(CborObject::fromByteArray))
                 .thenApply(opt -> opt
                         .map(cbor -> cbor.links().stream().map(c -> (Cid) c).collect(Collectors.toList()))
@@ -232,13 +254,25 @@ public class FileContentAddressedStorage implements DeletableContentAddressedSto
     }
 
     @Override
-    public Stream<Cid> getAllBlockHashes() {
+    public CompletableFuture<IpnsEntry> getIpnsEntry(Multihash signer) {
+        throw new IllegalStateException("Unimplemented!");
+    }
+
+    @Override
+    public Stream<Cid> getAllBlockHashes(boolean useBlockstore) {
         return getFiles().stream();
     }
 
     @Override
-    public void delete(Multihash h) {
-        Path path = getFilePath((Cid)h);
+    public void getAllBlockHashVersions(Consumer<List<BlockVersion>> res) {
+        res.accept(getAllBlockHashes(false)
+                .map(c -> new BlockVersion(c, null, true))
+                .collect(Collectors.toList()));
+    }
+
+    @Override
+    public void delete(Cid h) {
+        Path path = getFilePath(h);
         File file = root.resolve(path).toFile();
         if (file.exists())
             file.delete();
@@ -264,10 +298,13 @@ public class FileContentAddressedStorage implements DeletableContentAddressedSto
         getFilesRecursive(root, processor);
     }
 
-    private void getFilesRecursive(Path path, Consumer<Cid> accumulator) {
+    public static void getFilesRecursive(Path path, Consumer<Cid> accumulator) {
         File pathFile = path.toFile();
         if (pathFile.isFile()) {
-            accumulator.accept(Cid.decode(pathFile.getName()));
+            if (pathFile.getName().endsWith(".data")) {
+                String name = pathFile.getName();
+                accumulator.accept(DirectS3BlockStore.keyToHash(name.substring(0, name.length() - 5)));
+            }
             return;
         }
         else if (!  pathFile.isDirectory())
@@ -280,12 +317,13 @@ public class FileContentAddressedStorage implements DeletableContentAddressedSto
             Path child = path.resolve(filename);
             if (child.toFile().isDirectory()) {
                 getFilesRecursive(child, accumulator);
-            } else if (filename.startsWith("Q") || filename.startsWith("z")) { // tolerate non content addressed files in the same space
+            } else if (filename.endsWith(".data")) {
                 try {
-                    accumulator.accept(Cid.decode(child.toFile().getName()));
+                    String name = child.toFile().getName();
+                    accumulator.accept(DirectS3BlockStore.keyToHash(name.substring(0, name.length() - 5)));
                 } catch (IllegalStateException e) {
                     // ignore files who's name isn't a valid multihash
-                    LOG.info("Ignoring file "+ child +" since name is not a valid multihash");
+                    LOG.info("Ignoring file "+ child +" since name is not of form $cid.data");
                 }
             }
         }
@@ -318,7 +356,40 @@ public class FileContentAddressedStorage implements DeletableContentAddressedSto
     }
 
     @Override
+    public CompletableFuture<EncryptedCapability> getSecretLink(SecretLink link) {
+        throw new IllegalStateException("Shouldn't get here.");
+    }
+
+    @Override
+    public CompletableFuture<LinkCounts> getLinkCounts(String owner, LocalDateTime after, BatWithId mirrorBat) {
+        throw new IllegalStateException("Shouldn't get here.");
+    }
+
+    @Override
     public String toString() {
         return "FileContentAddressedStorage " + root;
+    }
+
+    public static void main(String[] a) throws Exception {
+        // run this within the .peergos dir
+        Path root = Paths.get(".ipfs/blocks");
+        Path targetDir = Paths.get("protobuf-blocks");
+        if (! targetDir.toFile().mkdir())
+            throw new IllegalStateException("Couldn't create target dir!");
+        moveProtobufBlocks(root, targetDir);
+    }
+    public static void moveProtobufBlocks(Path root, Path targetDir) {
+        getFilesRecursive(root, cid -> {
+            if (cid.codec == Cid.Codec.DagProtobuf) {
+                // move block
+                String filename = DirectS3BlockStore.hashToKey(cid) + ".data";
+                Path path = getFilePath(cid);
+                try {
+                    Files.move(root.resolve(path), targetDir.resolve(filename), StandardCopyOption.REPLACE_EXISTING);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        });
     }
 }

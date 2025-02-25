@@ -81,7 +81,6 @@
     <copy todir="${build}/native-lib">
       <fileset dir="native-lib"/>
     </copy>
-    <copy todir="${build}/pki" file="assets/pki-state.cbor"></copy>
     <manifestclasspath property="manifest_cp" jarfile="myjar.jar">
       <classpath refid="dep.runtime" />
     </manifestclasspath>
@@ -89,6 +88,7 @@
       <manifest>
         <attribute name="Main-Class" value="peergos.server.Main"/>
         <attribute name="Class-Path" value="${manifest_cp}"/>
+        <attribute name="Multi-Release" value="true"/>
         <attribute name="Created-By" value="Java"/>
         <attribute name="Ant-Version" value="Ant"/>
       </manifest>
@@ -214,7 +214,7 @@
     <copy todir="war/WEB-INF/lib" file="${gwt.sdk}/gwt-servlet.jar" />
     <copy todir="war/WEB-INF/lib" file="${gwt.sdk}/gwt-servlet-deps.jar" />
     <!-- Add any additional server libs that need to be copied -->
-    <copy todir="war/WEB-INF/lib" file="lib/jnr-fuse-0.5.3-all.jar" />
+    <!-- <copy todir="war/WEB-INF/lib" file="lib/jnr-fuse-0.5.7-all.jar" />-->
   </target>
 
   <target name="javac" depends="libs" description="Compile java source to bytecode">
@@ -233,7 +233,7 @@
   </target>
 
   <target name="gwtc" depends="javac" description="GWT compile to JavaScript (production mode)">
-    <java failonerror="true" fork="true" classname="com.google.gwt.dev.Compiler" maxmemory="3g">
+    <java failonerror="true" fork="true" classname="com.google.gwt.dev.Compiler" maxmemory="4g">
       <classpath>
         <pathelement location="src"/>
         <path refid="project.class.path"/>

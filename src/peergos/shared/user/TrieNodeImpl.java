@@ -8,12 +8,16 @@ import peergos.shared.util.Futures;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 @JsType
 public class TrieNodeImpl implements TrieNode {
-	private static final Logger LOG = Logger.getGlobal();
+	private static final Logger LOG = Logger.getLogger(TrieNodeImpl.class.getName());
+    public static void disableLog() {
+        LOG.setLevel(Level.OFF);
+    }
     private final Map<String, TrieNode> children;
     private final Optional<EntryPoint> value;
 
@@ -36,7 +40,7 @@ public class TrieNodeImpl implements TrieNode {
     @Override
     public CompletableFuture<Optional<FileWrapper>> getByPath(String path, Hasher hasher, NetworkAccess network) {
         FileProperties.ensureValidPath(path);
-        LOG.info("GetByPath: " + path);
+//        LOG.info("GetByPath: " + path);
         String finalPath = TrieNode.canonicalise(path);
         if (finalPath.length() == 0) {
             if (! value.isPresent()) { // find a valid child entry and traverse parent links
@@ -154,7 +158,7 @@ public class TrieNodeImpl implements TrieNode {
             return network.getFile(value.get(), version)
                     .thenCompose(dir -> {
                         if (dir.isPresent())
-                            return dir.get().getChildren(version, hasher, network)
+                            return dir.get().getChildren(version, hasher, network, true)
                                     .thenCompose(kids -> {
                                         if (dir.get().isWritable())
                                             return Futures.of(kids);
@@ -174,7 +178,7 @@ public class TrieNodeImpl implements TrieNode {
         if (!children.containsKey(elements[0]))
             return network.getFile(value.get(), version)
                     .thenCompose(dir -> dir.get().getDescendentByPath(trimmedPath, hasher, network)
-                            .thenCompose(parent -> parent.map(p -> p.getChildren(version, hasher, network))
+                            .thenCompose(parent -> parent.map(p -> p.getChildren(version, hasher, network, true))
                                     .orElseGet(() -> Futures.of(Collections.emptySet()))));
         return children.get(elements[0]).getChildren(trimmedPath.substring(elements[0].length()), hasher, version, network);
     }

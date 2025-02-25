@@ -12,11 +12,19 @@ public interface SqlSupplier {
 
     String insertTransactionCommand();
 
+    String insertServerIdCommand();
+
     String getByteArrayType();
 
     String getSerialIdType();
 
     String sqlInteger();
+
+    String ensureColumnExistsCommand(String table, String column, String type);
+
+    String addMetadataCommand();
+
+    String vacuumCommand();
 
     default String createMutablePointersTableCommand() {
         return "CREATE TABLE IF NOT EXISTS metadatablobs (writingkey text primary key not null, hash text not null); " +
@@ -28,9 +36,29 @@ public interface SqlSupplier {
                 "CREATE UNIQUE INDEX IF NOT EXISTS login_index ON login (username);";
     }
 
+    // credid is <= 1023 bytes
+    default String createMfaTableCommand() {
+        return "CREATE TABLE IF NOT EXISTS mfa (username text not null, name text not null, credid " + getByteArrayType() + " not null, " +
+                "type " + sqlInteger() + " not null, " +
+                "enabled boolean not null, " +
+                "created " + sqlInteger() + " not null, " +
+                "value " + getByteArrayType() + " not null); " +
+                "CREATE INDEX IF NOT EXISTS mfa_index ON mfa (username);";
+    }
+
+    default String createMfaChallengeTableCommand() {
+        return "CREATE TABLE IF NOT EXISTS mfa_challenge (username text primary key not null, challenge " + getByteArrayType() + " not null); " +
+                "CREATE UNIQUE INDEX IF NOT EXISTS mfa_challenge_index ON mfa_challenge (username);";
+    }
+
     default String createBatStoreTableCommand() {
         return "CREATE TABLE IF NOT EXISTS bats (username text not null, id text primary key not null, bat text not null); " +
                 "CREATE UNIQUE INDEX IF NOT EXISTS bat_index ON bats (id);";
+    }
+
+    default String createLinkCountTableCommand() {
+        return "CREATE TABLE IF NOT EXISTS linkcounts (username text not null, label "+sqlInteger()+" not null, count "+
+                sqlInteger()+" not null, modified "+sqlInteger()+" not null, PRIMARY KEY (username, label)); ";
     }
 
     default String createSpaceRequestsTableCommand() {
@@ -44,7 +72,23 @@ public interface SqlSupplier {
 
     default String createTransactionsTableCommand() {
         return "CREATE TABLE IF NOT EXISTS transactions (" +
-                "tid varchar(64) not null, owner varchar(64) not null, hash varchar(64) not null);";
+                "tid varchar(64) not null, owner varchar(64) not null, hash varchar(64) not null, time " + sqlInteger()+");";
+    }
+
+    default String createServerIdentitiesTableCommand() {
+        return "CREATE TABLE IF NOT EXISTS serverids (" +
+                "id " + getSerialIdType() + " primary key not null," +
+                "peerid " + getByteArrayType() + " not null, " +
+                "private " + getByteArrayType() + ", " +
+                "record " + getByteArrayType() + " not null);";
+    }
+
+    default String createBlockMetadataStoreTableCommand() {
+        return "CREATE TABLE IF NOT EXISTS blockmetadata (cid " + getByteArrayType() + " primary key not null, " +
+                "version varchar(160)," +
+                "size " + sqlInteger() + " not null, " +
+                "links " + getByteArrayType() + " not null, " +
+                "batids " + getByteArrayType() + " not null);";
     }
 
     default String createServerMessageTableCommand() {

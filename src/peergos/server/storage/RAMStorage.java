@@ -1,16 +1,21 @@
 package peergos.server.storage;
 
+import peergos.server.storage.auth.*;
 import peergos.shared.cbor.*;
+import peergos.shared.corenode.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.multihash.*;
-import peergos.shared.io.ipfs.cid.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.*;
 import peergos.shared.storage.auth.*;
+import peergos.shared.user.fs.*;
 import peergos.shared.util.*;
 
 import java.security.*;
+import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.function.*;
 import java.util.stream.*;
 
 public class RAMStorage implements DeletableContentAddressedStorage {
@@ -26,6 +31,9 @@ public class RAMStorage implements DeletableContentAddressedStorage {
     }
 
     @Override
+    public void setPki(CoreNode pki) {}
+
+    @Override
     public ContentAddressedStorage directToOrigin() {
         return this;
     }
@@ -33,6 +41,16 @@ public class RAMStorage implements DeletableContentAddressedStorage {
     @Override
     public CompletableFuture<Cid> id() {
         return CompletableFuture.completedFuture(new Cid(1, Cid.Codec.LibP2pKey, Multihash.Type.sha2_256, new byte[32]));
+    }
+
+    @Override
+    public CompletableFuture<List<Cid>> ids() {
+        return CompletableFuture.completedFuture(List.of(new Cid(1, Cid.Codec.LibP2pKey, Multihash.Type.sha2_256, new byte[32])));
+    }
+
+    @Override
+    public CompletableFuture<String> linkHost(PublicKeyHash owner) {
+        return Futures.of("localhost:8000");
     }
 
     @Override
@@ -49,26 +67,39 @@ public class RAMStorage implements DeletableContentAddressedStorage {
     }
 
     @Override
-    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat) {
-        return getChampLookup(root, champKey, bat, hasher);
+    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat, Optional<Cid> committedRoot) {
+        return getChampLookup(owner, root, champKey, bat, committedRoot, hasher);
     }
 
     @Override
-    public Stream<Cid> getAllBlockHashes() {
+    public Stream<Cid> getAllBlockHashes(boolean useBlockstore) {
         return storage.keySet().stream();
     }
 
+
     @Override
-    public void delete(Multihash hash) {
+    public void getAllBlockHashVersions(Consumer<List<BlockVersion>> res) {
+        res.accept(getAllBlockHashes(false)
+                .map(c -> new BlockVersion(c, null, true))
+                .collect(Collectors.toList()));
+    }
+
+    @Override
+    public void delete(Cid hash) {
         storage.remove(hash);
     }
 
     @Override
-    public List<Multihash> getOpenTransactionBlocks() {
+    public List<Cid> getOpenTransactionBlocks() {
         return openTransactions.values()
                 .stream()
                 .flatMap(List::stream)
                 .collect(Collectors.toList());
+    }
+
+    @Override
+    public void clearOldTransactions(long cutoffMillis) {
+
     }
 
     @Override
@@ -105,27 +136,27 @@ public class RAMStorage implements DeletableContentAddressedStorage {
     }
 
     @Override
-    public CompletableFuture<Optional<byte[]>> getRaw(Cid object, String auth) {
+    public CompletableFuture<Optional<byte[]>> getRaw(List<Multihash> peerIds, Cid object, String auth, boolean persistBlock) {
         return CompletableFuture.completedFuture(storage.containsKey(object) ?
                 Optional.of(storage.get(object)) :
                 Optional.empty());
     }
 
     @Override
-    public CompletableFuture<Optional<byte[]>> getRaw(Cid hash, Optional<BatWithId> bat) {
-        return getRaw(hash, bat, id().join(), hasher);
+    public CompletableFuture<Optional<byte[]>> getRaw(PublicKeyHash owner, Cid hash, Optional<BatWithId> bat) {
+        return getRaw(Collections.emptyList(), hash, bat, id().join(), hasher, false);
     }
 
     @Override
-    public CompletableFuture<Optional<CborObject>> get(Cid hash, String auth) {
+    public CompletableFuture<Optional<CborObject>> get(List<Multihash> peerIds, Cid hash, String auth, boolean persistBlock) {
         if (hash.codec == Cid.Codec.Raw)
             throw new IllegalStateException("Need to call getRaw if cid is not cbor!");
         return CompletableFuture.completedFuture(getAndParseObject(hash));
     }
 
     @Override
-    public CompletableFuture<Optional<CborObject>> get(Cid hash, Optional<BatWithId> bat) {
-        return get(hash, bat, id().join(), hasher);
+    public CompletableFuture<Optional<CborObject>> get(PublicKeyHash owner, Cid hash, Optional<BatWithId> bat) {
+        return get(Collections.emptyList(), hash, bat, id().join(), hasher, false);
     }
 
     private synchronized Optional<CborObject> getAndParseObject(Multihash hash) {
@@ -143,10 +174,15 @@ public class RAMStorage implements DeletableContentAddressedStorage {
     }
 
     @Override
-    public CompletableFuture<List<Cid>> getLinks(Cid root, String auth) {
+    public List<List<Cid>> bulkGetLinks(List<Multihash> peerIds, List<Want> wants) {
+        throw new IllegalStateException("Unimplemented!");
+    }
+
+    @Override
+    public CompletableFuture<List<Cid>> getLinks(Cid root) {
         if (root.codec == Cid.Codec.Raw)
             return CompletableFuture.completedFuture(Collections.emptyList());
-        return get(root, auth).thenApply(opt -> opt
+        return get(Collections.emptyList(), root, "", false).thenApply(opt -> opt
                 .map(cbor -> cbor.links().stream().map(c -> (Cid)c).collect(Collectors.toList()))
                 .orElse(Collections.emptyList())
         );
@@ -162,6 +198,21 @@ public class RAMStorage implements DeletableContentAddressedStorage {
         if (!storage.containsKey(block))
             return CompletableFuture.completedFuture(Optional.empty());
         return CompletableFuture.completedFuture(Optional.of(storage.get(block).length));
+    }
+
+    @Override
+    public CompletableFuture<IpnsEntry> getIpnsEntry(Multihash signer) {
+        throw new IllegalStateException("Unimplemented!");
+    }
+
+    @Override
+    public CompletableFuture<EncryptedCapability> getSecretLink(SecretLink link) {
+        throw new IllegalStateException("Shouldn't get here.");
+    }
+
+    @Override
+    public CompletableFuture<LinkCounts> getLinkCounts(String owner, LocalDateTime after, BatWithId mirrorBat) {
+        throw new IllegalStateException("Shouldn't get here.");
     }
 
     public static Cid hashToCid(byte[] input, boolean isRaw) {

@@ -2,12 +2,14 @@ package peergos.server.storage;
 
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.*;
 import peergos.shared.storage.auth.*;
+import peergos.shared.user.fs.*;
 import peergos.shared.util.*;
 
+import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 
@@ -31,6 +33,16 @@ public class NonWriteThroughStorage implements ContentAddressedStorage {
     }
 
     @Override
+    public CompletableFuture<List<Cid>> ids() {
+        return source.ids();
+    }
+
+    @Override
+    public CompletableFuture<String> linkHost(PublicKeyHash owner) {
+        return source.linkHost(owner);
+    }
+
+    @Override
     public CompletableFuture<TransactionId> startTransaction(PublicKeyHash owner) {
         return modifications.startTransaction(owner);
     }
@@ -41,8 +53,8 @@ public class NonWriteThroughStorage implements ContentAddressedStorage {
     }
 
     @Override
-    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat) {
-        return modifications.getChampLookup(owner, root, champKey, bat);
+    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat,Optional<Cid> committedRoot) {
+        return modifications.getChampLookup(owner, root, champKey, bat, committedRoot);
     }
 
     @Override
@@ -65,24 +77,24 @@ public class NonWriteThroughStorage implements ContentAddressedStorage {
     }
 
     @Override
-    public CompletableFuture<Optional<byte[]>> getRaw(Cid object, Optional<BatWithId> bat) {
+    public CompletableFuture<Optional<byte[]>> getRaw(PublicKeyHash owner, Cid object, Optional<BatWithId> bat) {
         try {
-            Optional<byte[]> modified = modifications.getRaw(object, bat).get();
+            Optional<byte[]> modified = modifications.getRaw(owner, object, bat).get();
             if ( modified.isPresent())
                 return CompletableFuture.completedFuture(modified);
-            return source.getRaw(object, bat);
+            return source.getRaw(owner, object, bat);
         } catch (Exception e) {
             throw new RuntimeException(e.getMessage(), e);
         }
     }
 
     @Override
-    public CompletableFuture<Optional<CborObject>> get(Cid hash, Optional<BatWithId> bat) {
+    public CompletableFuture<Optional<CborObject>> get(PublicKeyHash owner, Cid hash, Optional<BatWithId> bat) {
         try {
-            Optional<CborObject> modified = modifications.get(hash, bat).get();
+            Optional<CborObject> modified = modifications.get(owner, hash, bat).get();
             if ( modified.isPresent())
                 return CompletableFuture.completedFuture(modified);
-            return source.get(hash, bat);
+            return source.get(owner, hash, bat);
         } catch (Exception e) {
             throw new RuntimeException(e.getMessage(), e);
         }
@@ -91,12 +103,27 @@ public class NonWriteThroughStorage implements ContentAddressedStorage {
     @Override
     public CompletableFuture<Optional<Integer>> getSize(Multihash block) {
         try {
-            Optional<CborObject> modified = modifications.get((Cid)block, Optional.empty()).get();
+            Optional<CborObject> modified = modifications.get(null, (Cid)block, Optional.empty()).get();
             if (modified.isPresent())
                 return CompletableFuture.completedFuture(modified.map(cbor -> cbor.toByteArray().length));
             return source.getSize(block);
         } catch (Exception e) {
             throw new RuntimeException(e.getMessage(), e);
         }
+    }
+
+    @Override
+    public CompletableFuture<EncryptedCapability> getSecretLink(SecretLink link) {
+        throw new IllegalStateException("Unsupported operation!");
+    }
+
+    @Override
+    public CompletableFuture<LinkCounts> getLinkCounts(String owner, LocalDateTime after, BatWithId mirrorBat) {
+        throw new IllegalStateException("Unsupported operation!");
+    }
+
+    @Override
+    public CompletableFuture<IpnsEntry> getIpnsEntry(Multihash signer) {
+        throw new IllegalStateException("Unimplemented!");
     }
 }

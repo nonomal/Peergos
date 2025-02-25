@@ -2,7 +2,7 @@ package peergos.shared.storage.controller;
 
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.*;
 import peergos.shared.user.*;
 import peergos.shared.util.*;
@@ -54,9 +54,9 @@ public class HttpInstanceAdmin implements InstanceAdmin {
     }
 
     @Override
-    public CompletableFuture<Boolean> acceptingSignups() {
+    public CompletableFuture<AllowedSignups> acceptingSignups() {
         return poster.get(Constants.ADMIN_URL + SIGNUPS)
-                .thenApply(res -> ((CborObject.CborBoolean)CborObject.fromByteArray(res)).value);
+                .thenApply(res -> AllowedSignups.fromCbor(CborObject.fromByteArray(res)));
     }
 
     @Override

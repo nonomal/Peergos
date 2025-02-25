@@ -7,25 +7,21 @@ import peergos.server.*;
 import peergos.server.storage.*;
 import peergos.server.util.*;
 import peergos.shared.*;
-import peergos.shared.io.ipfs.multiaddr.*;
-import peergos.shared.io.ipfs.multihash.Multihash;
-import peergos.shared.storage.auth.*;
+import peergos.shared.io.ipfs.MultiAddress;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.user.UserContext;
 import peergos.shared.user.fs.*;
 
 import java.net.URL;
 import java.util.*;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
-import static peergos.server.Main.ENSURE_IPFS_INSTALLED;
 import static peergos.server.Main.IPFS;
 import static peergos.server.tests.UserTests.randomString;
 
 public class P2pStreamNetworkTests {
     private static Args args = UserTests
-            .buildArgs().with("useIPFS", "true")
-            .with("allow-target", "/ip4/127.0.0.1/tcp/8002")
+            .buildArgs()
+            .with("useIPFS", "true")
             .with(IpfsWrapper.IPFS_BOOTSTRAP_NODES, ""); // no bootstrapping
 
     private static Random random = new Random(0);
@@ -56,7 +52,6 @@ public class P2pStreamNetworkTests {
                 .with("proxy-target", new MultiAddress(args.getArg("ipfs-gateway-address")).toString())
                 .with("ipfs-api-address", Main.getLocalMultiAddress(ipfsApiPort).toString());
 
-        ENSURE_IPFS_INSTALLED.main(normalNode);
         IPFS.main(normalNode);
 
 //        IPFS node2 = new IPFS(Main.getLocalMultiAddress(ipfsApiPort));
@@ -66,11 +61,11 @@ public class P2pStreamNetworkTests {
     }
 
     private static NetworkAccess buildApi(Args args) throws Exception {
-        return Builder.buildJavaNetworkAccess(new URL("http://localhost:" + args.getInt("port")), false).get();
+        return Builder.buildJavaNetworkAccess(new URL("http://localhost:" + args.getInt("port")), false, Optional.empty()).get();
     }
 
     private static NetworkAccess buildProxiedApi(int ipfsApiPort, int ipfsGatewayPort, Multihash pkinodeId) throws Exception {
-        return Builder.buildJavaNetworkAccess(new URL("http://localhost:" + ipfsApiPort), new URL("http://localhost:" + ipfsGatewayPort), pkinodeId.toString()).get();
+        return Builder.buildJavaGatewayAccess(new URL("http://localhost:" + ipfsApiPort), new URL("http://localhost:" + ipfsGatewayPort), pkinodeId.toString()).get();
     }
 
     @Test

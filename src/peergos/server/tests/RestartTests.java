@@ -7,7 +7,7 @@ import peergos.server.util.*;
 import peergos.shared.*;
 import peergos.shared.crypto.hash.*;
 import peergos.shared.crypto.symmetric.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.social.*;
 import peergos.shared.user.*;
 import peergos.shared.user.fs.*;
@@ -33,7 +33,7 @@ public class RestartTests {
     private static Process server;
 
     public RestartTests() throws Exception {
-        this.network = Builder.buildJavaNetworkAccess(new URL("http://localhost:" + args.getInt("port")), false).join();
+        this.network = Builder.buildJavaNetworkAccess(new URL("http://localhost:" + args.getInt("port")), false, Optional.empty()).join();
     }
 
     @BeforeClass
@@ -53,7 +53,7 @@ public class RestartTests {
     }
 
     private static void restart() throws Exception {
-        NetworkAccess network = Builder.buildJavaNetworkAccess(new URL("http://localhost:" + args.getInt("port")), false)
+        NetworkAccess network = Builder.buildJavaNetworkAccess(new URL("http://localhost:" + args.getInt("port")), false, Optional.empty())
                 .join();
         Multihash pkiNodeId = network.dhtClient.id().join();
         PublicKeyHash peergosId = network.coreNode.getPublicKeyHash("peergos").join().get();
@@ -70,7 +70,7 @@ public class RestartTests {
     private static void waitUntilReady() {
         for (int i=0; i < 30; i++) {
             try {
-                Builder.buildJavaNetworkAccess(new URL("http://localhost:" + args.getInt("port")), false).join();
+                Builder.buildJavaNetworkAccess(new URL("http://localhost:" + args.getInt("port")), false, Optional.empty()).join();
                 return;
             } catch (Exception e) {
                 try {
@@ -123,12 +123,12 @@ public class RestartTests {
 
         // change password for u2
         String password3 = random();
-        u2.changePassword(password2, password3).join();
+        u2.changePassword(password2, password3, UserTests::noMfa).join();
 
         // restart the server
         restart();
 
-        UserContext freshU1 = UserContext.signIn(username1, password1, network.clear(), crypto).join();
+        UserContext freshU1 = UserContext.signIn(username1, password1, UserTests::noMfa, network.clear(), crypto).join();
         Optional<FileWrapper> u2ToU1 = freshU1.getByPath("/" + u2.username).join();
         assertTrue("Friend root present after their password change", u2ToU1.isPresent());
     }

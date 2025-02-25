@@ -2,8 +2,9 @@ package peergos.server.storage.admin;
 
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.*;
+import peergos.shared.storage.controller.*;
 import peergos.shared.user.*;
 import peergos.shared.util.*;
 
@@ -17,6 +18,8 @@ public class HttpQuotaAdmin implements QuotaAdmin {
     public static final String SIGNUPS = "signups";
     public static final String USERNAMES = "usernames";
     public static final String ALLOWED = "allowed";
+    public static final String CREATE_PAID = "create-paid";
+    public static final String REMOVE_DESIRED = "remove-desired-quota";
     public static final String TOKEN_ADD = "token-add";
     public static final String TOKEN_REMOVE = "token-remove";
     public static final String QUOTA_PRIVATE = "quota-by-name";
@@ -31,15 +34,26 @@ public class HttpQuotaAdmin implements QuotaAdmin {
     }
 
     @Override
-    public boolean acceptingSignups() {
+    public AllowedSignups acceptingSignups() {
         return poster.get(QUOTA_URL + SIGNUPS)
-                .thenApply(res -> ((CborObject.CborBoolean)CborObject.fromByteArray(res)).value).join();
+                .thenApply(res -> AllowedSignups.fromCbor(CborObject.fromByteArray(res))).join();
     }
 
     @Override
     public boolean allowSignupOrUpdate(String username, String token) {
         return poster.get(QUOTA_URL + ALLOWED + "?username=" + username + "&token="+token)
                 .thenApply(res -> ((CborObject.CborBoolean)CborObject.fromByteArray(res)).value).join();
+    }
+
+    @Override
+    public PaymentProperties createPaidUser(String username) {
+        return poster.get(QUOTA_URL + CREATE_PAID + "?username=" + username)
+                .thenApply(res -> PaymentProperties.fromCbor(CborObject.fromByteArray(res))).join();
+    }
+
+    @Override
+    public void removeDesiredQuota(String username) {
+        poster.get(QUOTA_URL + REMOVE_DESIRED + "?username=" + username).join();
     }
 
     @Override
@@ -85,9 +99,9 @@ public class HttpQuotaAdmin implements QuotaAdmin {
     }
 
     @Override
-    public CompletableFuture<Boolean> requestQuota(PublicKeyHash owner, byte[] signedRequest) {
-        return poster.get(QUOTA_URL + REQUEST_QUOTA + "?owner="+owner + "&req=" + ArrayOps.bytesToHex(signedRequest))
-                .thenApply(res -> ((CborObject.CborBoolean)CborObject.fromByteArray(res)).value);
+    public CompletableFuture<PaymentProperties> requestQuota(PublicKeyHash owner, byte[] signedRequest, long usage) {
+        return poster.get(QUOTA_URL + REQUEST_QUOTA + "?owner="+owner + "&req=" + ArrayOps.bytesToHex(signedRequest) + "&usage=" + usage)
+                .thenApply(res -> PaymentProperties.fromCbor(CborObject.fromByteArray(res)));
     }
 
    @Override

@@ -6,14 +6,12 @@ import org.junit.runners.*;
 import peergos.server.*;
 import peergos.server.sql.*;
 import peergos.server.storage.*;
-import peergos.server.util.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.*;
 
 import java.security.*;
-import java.sql.*;
 import java.util.*;
 
 @RunWith(Parameterized.class)
@@ -59,11 +57,11 @@ public class TransactionsStoreTests {
             pending.add(block);
             store.addBlock(block, tid, owner);
         }
-        List<Multihash> uncommitted = store.getOpenTransactionBlocks();
+        List<Cid> uncommitted = store.getOpenTransactionBlocks();
         Assert.assertTrue("All blocks present", uncommitted.containsAll(pending));
 
         store.closeTransaction(owner, tid);
-        List<Multihash> empty = store.getOpenTransactionBlocks();
+        List<Cid> empty = store.getOpenTransactionBlocks();
         Assert.assertTrue("All blocks removed", empty.isEmpty());
     }
 }

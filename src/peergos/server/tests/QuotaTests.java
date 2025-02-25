@@ -31,7 +31,7 @@ public class QuotaTests {
     private static Random random = new Random(RANDOM_SEED);
 
     public QuotaTests(Args args) throws Exception {
-        this.network = Builder.buildJavaNetworkAccess(new URL("http://localhost:" + args.getInt("port")), false).get();
+        this.network = Builder.buildJavaNetworkAccess(new URL("http://localhost:" + args.getInt("port")), false, Optional.empty()).get();
     }
 
     @Parameterized.Parameters()
@@ -84,6 +84,7 @@ public class QuotaTests {
             Path filePath = PathUtil.get(username, filename);
             FileWrapper file = context.getByPath(filePath).get().get();
             file.remove(context.getUserRoot().join(), filePath, context).get();
+            Thread.sleep(2_000);
         }
     }
 

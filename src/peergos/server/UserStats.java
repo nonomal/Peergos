@@ -1,9 +1,11 @@
 package peergos.server;
 
+import peergos.server.storage.*;
 import peergos.shared.*;
 import peergos.shared.corenode.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Multihash;
+import peergos.shared.storage.*;
 import peergos.shared.user.*;
 import peergos.shared.util.*;
 
@@ -19,7 +21,7 @@ public class UserStats {
 
     public static void main(String[] args) throws Exception {
         Crypto crypto = Main.initCrypto();
-        NetworkAccess network = Builder.buildJavaNetworkAccess(new URL("https://peergos.net"), true).get();
+        NetworkAccess network = Builder.buildJavaNetworkAccess(new URL("https://peergos.net"), true, Optional.empty()).get();
         List<String> usernames = network.coreNode.getUsernames("").get();
         ForkJoinPool pool = new ForkJoinPool(20);
         List<String> errors = Collections.synchronizedList(new ArrayList<>());
@@ -32,13 +34,12 @@ public class UserStats {
                 hosts = last.claim.storageProviders;
                 PublicKeyHash owner = last.owner;
                 Set<PublicKeyHash> ownedKeysRecursive =
-                        WriterData.getOwnedKeysRecursive(username, network.coreNode, network.mutable,
-                                network.dhtClient, network.hasher).join();
-                long total = network.spaceUsage.getUsage(owner).join();
-                String summary = "User: " + username + ", expiry: " + expiry + " usage: " + total
+                        DeletableContentAddressedStorage.getOwnedKeysRecursive(username, network.coreNode, network.mutable,
+                                (h, s) -> ContentAddressedStorage.getWriterData(owner, h, s, network.dhtClient), network.dhtClient, network.hasher).join();
+                String summary = "User: " + username + ", expiry: " + expiry
                         + ", owned keys: " + ownedKeysRecursive.size() + "\n";
                 System.out.println(summary);
-                return Stream.of(new Summary(username, expiry, total, hosts, ownedKeysRecursive));
+                return Stream.of(new Summary(username, expiry, hosts, ownedKeysRecursive));
             } catch (Exception e) {
                 String host = hosts.stream().findFirst().map(Object::toString).orElse("");
                 errors.add(username + ": " + host);
@@ -50,9 +51,6 @@ public class UserStats {
 
         System.out.println("Errors: " + errors.size());
         errors.forEach(System.out::println);
-
-        // Sort by usage
-        sortAndPrint(summaries, (a, b) -> Long.compare(b.usage, a.usage), "usage.txt");
 
         // Sort by expiry
         sortAndPrint(summaries, (a, b) -> a.expiry.compareTo(b.expiry), "expiry.txt");
@@ -79,21 +77,19 @@ public class UserStats {
     private static class Summary {
         public final String username;
         public final LocalDate expiry;
-        public final long usage;
         public final List<Multihash> storageProviders;
         public final Set<PublicKeyHash> ownedKeys;
 
-        public Summary(String username, LocalDate expiry, long usage, List<Multihash> storageProviders, Set<PublicKeyHash> ownedKeys) {
+        public Summary(String username, LocalDate expiry, List<Multihash> storageProviders, Set<PublicKeyHash> ownedKeys) {
             this.username = username;
             this.expiry = expiry;
-            this.usage = usage;
             this.storageProviders = storageProviders;
             this.ownedKeys = ownedKeys;
         }
 
         public String toString() {
-            return "User: " + username + ", expiry: " + expiry + ", usage: " + usage
-                    + ", hosts: " + storageProviders + ", owned keys: " + ownedKeys.size();
+            return "User: " + username + ", expiry: " + expiry + ", hosts: " + storageProviders
+                    + ", owned keys: " + ownedKeys.size();
         }
     }
 }

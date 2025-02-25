@@ -1,13 +1,14 @@
 package peergos.shared.hamt;
 
+import peergos.server.storage.*;
 import peergos.shared.*;
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.*;
-import peergos.shared.user.*;
+import peergos.shared.storage.auth.*;
 import peergos.shared.util.*;
 
 import java.util.*;
@@ -22,7 +23,7 @@ public class Champ<V extends Cborable> implements Cborable {
 
     private static final int HASH_CODE_LENGTH = 32;
 
-    private static class KeyElement<V extends Cborable> {
+    public static class KeyElement<V extends Cborable> {
         public final ByteArrayWrapper key;
         public final Optional<V> valueHash;
 
@@ -46,7 +47,7 @@ public class Champ<V extends Cborable> implements Cborable {
         }
     }
 
-    private static class HashPrefixPayload<V extends Cborable> {
+    public static class HashPrefixPayload<V extends Cborable> {
         public final KeyElement<V>[] mappings;
         public final MaybeMultihash link;
 
@@ -91,21 +92,27 @@ public class Champ<V extends Cborable> implements Cborable {
     }
 
     public static <V extends Cborable> Champ<V> empty(Function<Cborable, V> fromCbor) {
-        return new Champ<>(new BitSet(), new BitSet(), new HashPrefixPayload[0], fromCbor);
+        return new Champ<>(new BitSet(), new BitSet(), new HashPrefixPayload[0], fromCbor, Optional.empty());
     }
 
-    private final BitSet dataMap, nodeMap;
+    public final BitSet dataMap, nodeMap;
     private final HashPrefixPayload<V>[] contents;
     private final Function<Cborable, V> fromCbor;
+    public final Optional<BatId> mirrorBat;
 
-    public Champ(BitSet dataMap, BitSet nodeMap, HashPrefixPayload<V>[] contents, Function<Cborable, V> fromCbor) {
+    public Champ(BitSet dataMap, BitSet nodeMap, HashPrefixPayload<V>[] contents, Function<Cborable, V> fromCbor, Optional<BatId> mirrorBat) {
         this.dataMap = dataMap;
         this.nodeMap = nodeMap;
         this.contents = contents;
         this.fromCbor = fromCbor;
+        this.mirrorBat = mirrorBat;
         for (int i=0; i< contents.length; i++)
             if (contents[i] == null)
                 throw new IllegalStateException();
+    }
+
+    public Champ<V> withBat(Optional<BatId> newMirrorBat) {
+        return new Champ<V>(dataMap, nodeMap, contents, fromCbor, newMirrorBat);
     }
 
     private int keyCount() {
@@ -149,15 +156,15 @@ public class Champ<V extends Cborable> implements Cborable {
         return total;
     }
 
-    CompletableFuture<Pair<Multihash, Optional<Champ<V>>>> getChild(byte[] hash, int depth, int bitWidth, ContentAddressedStorage storage) {
+    CompletableFuture<Pair<Multihash, Optional<Champ<V>>>> getChild(PublicKeyHash owner, byte[] hash, int depth, int bitWidth, ContentAddressedStorage storage) {
         int bitpos = mask(hash, depth, bitWidth);
         int index = contents.length - 1 - getIndex(this.nodeMap, bitpos);
         Multihash childHash = contents[index].link.get();
-        return storage.get((Cid) childHash, Optional.empty())
+        return storage.get(owner, (Cid) childHash, Optional.empty())
                 .thenApply(x -> new Pair<>(childHash, x.map(y -> Champ.fromCbor(y, fromCbor))));
     }
 
-    public CompletableFuture<Long> size(int depth, ContentAddressedStorage storage) {
+    public CompletableFuture<Long> size(PublicKeyHash owner, int depth, ContentAddressedStorage storage) {
         long keys = keyCount();
         if (nodeCount() == 0)
             return CompletableFuture.completedFuture(keys);
@@ -167,9 +174,9 @@ public class Champ<V extends Cborable> implements Cborable {
             HashPrefixPayload<V> pointer = contents[i];
             if (! pointer.isShard())
                 break; // we reach the key section
-            childCounts.add(storage.get((Cid) pointer.link.get(), Optional.empty())
+            childCounts.add(storage.get(owner, (Cid) pointer.link.get(), Optional.empty())
                     .thenApply(x -> new Pair<>(pointer.link.get(), x.map(y -> Champ.fromCbor(y, fromCbor))))
-                    .thenCompose(child -> child.right.map(c -> c.size(depth + 1, storage))
+                    .thenCompose(child -> child.right.map(c -> c.size(owner, depth + 1, storage))
                             .orElse(CompletableFuture.completedFuture(0L)))
             );
         }
@@ -192,7 +199,7 @@ public class Champ<V extends Cborable> implements Cborable {
      * @param storage The storage
      * @return The value, if any, that this key maps to
      */
-    public CompletableFuture<Optional<V>> get(ByteArrayWrapper key, byte[] hash, int depth, int bitWidth, ContentAddressedStorage storage) {
+    public CompletableFuture<Optional<V>> get(PublicKeyHash owner, ByteArrayWrapper key, byte[] hash, int depth, int bitWidth, ContentAddressedStorage storage) {
         final int bitpos = mask(hash, depth, bitWidth);
 
         if (dataMap.get(bitpos)) { // local value
@@ -208,12 +215,18 @@ public class Champ<V extends Cborable> implements Cborable {
         }
 
         if (nodeMap.get(bitpos)) { // child node
-            return getChild(hash, depth, bitWidth, storage)
-                    .thenCompose(child -> child.right.map(c -> c.get(key, hash, depth + 1, bitWidth, storage))
+            return getChild(owner, hash, depth, bitWidth, storage)
+                    .thenCompose(child -> child.right.map(c -> c.get(owner, key, hash, depth + 1, bitWidth, storage))
                             .orElse(CompletableFuture.completedFuture(Optional.empty())));
         }
 
         return CompletableFuture.completedFuture(Optional.empty());
+    }
+
+    private Champ<V> withMirrorBat(Optional<BatId> mirrorBat, int depth) {
+        if (depth > 0 || mirrorBat.isEmpty())
+            return this;
+        return new Champ<>(dataMap, nodeMap, contents, fromCbor, mirrorBat);
     }
 
     /**
@@ -241,6 +254,7 @@ public class Champ<V extends Cborable> implements Cborable {
                                                             Optional<V> value,
                                                             int bitWidth,
                                                             int maxCollisions,
+                                                            Optional<BatId> mirrorBat,
                                                             Function<ByteArrayWrapper, CompletableFuture<byte[]>> hasher,
                                                             TransactionId tid,
                                                             ContentAddressedStorage storage,
@@ -259,30 +273,30 @@ public class Champ<V extends Cborable> implements Cborable {
                 if (currentKey.equals(key)) {
                     if (! currentVal.equals(expected)) {
                         CompletableFuture<Pair<Champ<V>, Multihash>> err = new CompletableFuture<>();
-                        err.completeExceptionally(new MutableTree.CasException(currentVal, expected));
+                        err.completeExceptionally(new CasException(currentVal, expected));
                         return err;
                     }
 
                     // update mapping
-                    Champ<V> champ = copyAndSetValue(index, payloadIndex, value);
+                    Champ<V> champ = copyAndSetValue(index, payloadIndex, value).withMirrorBat(mirrorBat, depth);
                     return storage.put(owner, writer, champ.serialize(), writeHasher, tid).thenApply(h -> new Pair<>(champ, h));
                 }
             }
             if (mappings.length < maxCollisions) {
-                Champ<V> champ = insertIntoPrefix(index, key, value);
+                Champ<V> champ = insertIntoPrefix(index, key, value).withMirrorBat(mirrorBat, depth);
                 return storage.put(owner, writer, champ.serialize(), writeHasher, tid).thenApply(h -> new Pair<>(champ, h));
             }
 
             return pushMappingsDownALevel(owner, writer, mappings,
-                    key, hash, value, depth + 1, bitWidth, maxCollisions, hasher, tid, storage, writeHasher)
+                    key, hash, value, depth + 1, bitWidth, maxCollisions, mirrorBat, hasher, tid, storage, writeHasher)
                     .thenCompose(p -> {
-                        Champ<V> champ = copyAndMigrateFromInlineToNode(bitpos, p);
+                        Champ<V> champ = copyAndMigrateFromInlineToNode(bitpos, p).withMirrorBat(mirrorBat, depth);
                         return storage.put(owner, writer, champ.serialize(), writeHasher, tid).thenApply(h -> new Pair<>(champ, h));
                     });
         } else if (nodeMap.get(bitpos)) { // child node
-            return getChild(hash, depth, bitWidth, storage)
+            return getChild(owner, hash, depth, bitWidth, storage)
                     .thenCompose(child -> child.right.get().put(owner, writer, key, hash, depth + 1, expected, value,
-                            bitWidth, maxCollisions, hasher, tid, storage, writeHasher, child.left)
+                            bitWidth, maxCollisions, mirrorBat, hasher, tid, storage, writeHasher, child.left)
                             .thenCompose(newChild -> {
                                 if (newChild.right.equals(child.left))
                                     return CompletableFuture.completedFuture(new Pair<>(this, ourHash));
@@ -291,7 +305,7 @@ public class Champ<V extends Cborable> implements Cborable {
                             }));
         } else {
             // no value
-            Champ<V> champ = addNewPrefix(bitpos, key, value);
+            Champ<V> champ = addNewPrefix(bitpos, key, value).withMirrorBat(mirrorBat, depth);
             return storage.put(owner, writer, champ.serialize(), writeHasher, tid).thenApply(h -> new Pair<>(champ, h));
         }
     }
@@ -305,6 +319,7 @@ public class Champ<V extends Cborable> implements Cborable {
                                                                                 final int depth,
                                                                                 int bitWidth,
                                                                                 int maxCollisions,
+                                                                                Optional<BatId> mirrorBat,
                                                                                 Function<ByteArrayWrapper, CompletableFuture<byte[]>> hasher,
                                                                                 TransactionId tid,
                                                                                 ContentAddressedStorage storage,
@@ -317,13 +332,13 @@ public class Champ<V extends Cborable> implements Cborable {
         return storage.put(owner, writer, empty.serialize(), writeHasher, tid)
                 .thenApply(h -> new Pair<>(empty, h))
                 .thenCompose(p -> p.left.put(owner, writer, key1, hash1, depth, Optional.empty(), val1,
-                        bitWidth, maxCollisions, hasher, tid, storage, writeHasher, p.right))
+                        bitWidth, maxCollisions, mirrorBat, hasher, tid, storage, writeHasher, p.right))
                 .thenCompose(one -> Futures.reduceAll(
                         Arrays.stream(mappings).collect(Collectors.toList()),
                         one,
                         (p, e) -> hasher.apply(e.key)
                                 .thenCompose(eHash -> p.left.put(owner, writer, e.key, eHash, depth, Optional.empty(),
-                                        e.valueHash, bitWidth, maxCollisions, hasher, tid, storage, writeHasher, p.right)),
+                                        e.valueHash, bitWidth, maxCollisions, mirrorBat, hasher, tid, storage, writeHasher, p.right)),
                         (a, b) -> a)
                 );
     }
@@ -338,7 +353,7 @@ public class Champ<V extends Cborable> implements Cborable {
         updated[payloadIndex] = new KeyElement<>(existing.mappings[payloadIndex].key, val);
         dst[setIndex] = new HashPrefixPayload<>(updated);
 
-        return new Champ<>(dataMap, nodeMap, dst, fromCbor);
+        return new Champ<>(dataMap, nodeMap, dst, fromCbor, mirrorBat);
     }
 
     private Champ<V> insertIntoPrefix(final int index, final ByteArrayWrapper key, final Optional<V> val) {
@@ -352,7 +367,7 @@ public class Champ<V extends Cborable> implements Cborable {
         Arrays.sort(prefix, Comparator.comparing(m -> m.key));
         result[index] = new HashPrefixPayload<>(prefix);
 
-        return new Champ<>(dataMap, nodeMap, result, fromCbor);
+        return new Champ<>(dataMap, nodeMap, result, fromCbor, mirrorBat);
     }
 
     private Champ<V> addNewPrefix(final int bitpos, final ByteArrayWrapper key, final Optional<V> val) {
@@ -367,7 +382,7 @@ public class Champ<V extends Cborable> implements Cborable {
 
         BitSet newDataMap = BitSet.valueOf(dataMap.toByteArray());
         newDataMap.set(bitpos);
-        return new Champ<>(newDataMap, nodeMap, result, fromCbor);
+        return new Champ<>(newDataMap, nodeMap, result, fromCbor, mirrorBat);
     }
 
     private Champ<V> copyAndMigrateFromInlineToNode(final int bitpos, final Pair<Champ<V>, Multihash> node) {
@@ -390,7 +405,7 @@ public class Champ<V extends Cborable> implements Cborable {
         newNodeMap.set(bitpos);
         BitSet newDataMap = BitSet.valueOf(dataMap.toByteArray());
         newDataMap.set(bitpos, false);
-        return new Champ<>(newDataMap, newNodeMap, dst, fromCbor);
+        return new Champ<>(newDataMap, newNodeMap, dst, fromCbor, mirrorBat);
     }
 
     private Champ<V> overwriteChildLink(final int bitpos, final Pair<Champ<V>, Multihash> node) {
@@ -402,7 +417,7 @@ public class Champ<V extends Cborable> implements Cborable {
 
         dst[setIndex] = new HashPrefixPayload<>(MaybeMultihash.of(node.right));
 
-        return new Champ<>(dataMap, nodeMap, dst, fromCbor);
+        return new Champ<>(dataMap, nodeMap, dst, fromCbor, mirrorBat);
     }
 
     /**
@@ -426,6 +441,7 @@ public class Champ<V extends Cborable> implements Cborable {
                                                                Optional<V> expected,
                                                                int bitWidth,
                                                                int maxCollisions,
+                                                               Optional<BatId> mirrorBat,
                                                                TransactionId tid,
                                                                ContentAddressedStorage storage,
                                                                Hasher writeHasher,
@@ -444,7 +460,7 @@ public class Champ<V extends Cborable> implements Cborable {
                 if (Objects.equals(currentKey, key)) {
                     if (!currentVal.equals(expected)) {
                         CompletableFuture<Pair<Champ<V>, Multihash>> err = new CompletableFuture<>();
-                        err.completeExceptionally(new MutableTree.CasException(currentVal, expected));
+                        err.completeExceptionally(new CasException(currentVal, expected));
                         return err;
                     }
 
@@ -473,7 +489,7 @@ public class Champ<V extends Cborable> implements Cborable {
                             Arrays.sort(remainingMappings, Comparator.comparing(x -> x.key));
                             HashPrefixPayload<V>[] oneBucket = new HashPrefixPayload[]{new HashPrefixPayload(remainingMappings)};
 
-                            champ = new Champ<>(newDataMap, new BitSet(), oneBucket, fromCbor);
+                            champ = new Champ<>(newDataMap, new BitSet(), oneBucket, fromCbor, Optional.empty()).withMirrorBat(mirrorBat, 0);
                         } else {
                             final BitSet newDataMap = BitSet.valueOf(dataMap.toByteArray());
                             boolean lastInPrefix = mappings.length == 1;
@@ -493,20 +509,22 @@ public class Champ<V extends Cborable> implements Cborable {
                                 dst[dataIndex] = new HashPrefixPayload<>(remaining);
                             }
 
-                            champ = new Champ(newDataMap, new BitSet(), dst, fromCbor);
+                            champ = new Champ(newDataMap, new BitSet(), dst, fromCbor, mirrorBat);
                         }
                         return storage.put(owner, writer, champ.serialize(), writeHasher, tid).thenApply(h -> new Pair<>(champ, h));
                     } else {
-                        Champ<V> champ = removeMapping(bitpos, payloadIndex);
+                        Champ<V> champ = removeMapping(bitpos, payloadIndex).withMirrorBat(mirrorBat, depth);
                         return storage.put(owner, writer, champ.serialize(), writeHasher, tid).thenApply(h -> new Pair<>(champ, h));
                     }
                 }
             }
-            return CompletableFuture.completedFuture(new Pair<>(this, ourHash));
+            CompletableFuture<Pair<Champ<V>, Multihash>> err = new CompletableFuture<>();
+            err.completeExceptionally(new CasException(Optional.empty(), expected));
+            return err;
         } else if (nodeMap.get(bitpos)) { // node (not value)
-            return getChild(hash, depth, bitWidth, storage)
+            return getChild(owner, hash, depth, bitWidth, storage)
                     .thenCompose(child -> child.right.get().remove(owner, writer, key, hash, depth + 1, expected,
-                            bitWidth, maxCollisions, tid, storage, writeHasher, child.left)
+                            bitWidth, maxCollisions, mirrorBat, tid, storage, writeHasher, child.left)
                             .thenCompose(newChild -> {
                                 if (child.left.equals(newChild.right))
                                     return CompletableFuture.completedFuture(new Pair<>(this, ourHash));
@@ -515,7 +533,7 @@ public class Champ<V extends Cborable> implements Cborable {
                                     throw new IllegalStateException("Sub-node must have at least one element.");
                                 } else if (newChild.left.nodeCount() == 0 && newChild.left.keyCount() == maxCollisions) {
                                     if (this.keyCount() == 0 && this.nodeCount() == 1) {
-                                        // escalate singleton result (the child already has the depth corrected index)
+                                        // escalate singleton result (the child already has the depth corrected index and mirror bat)
                                         return CompletableFuture.completedFuture(newChild);
                                     } else {
                                         // inline value (move to front)
@@ -561,7 +579,7 @@ public class Champ<V extends Cborable> implements Cborable {
         newNodeMap.set(bitpos, false);
         BitSet newDataMap = BitSet.valueOf(dataMap.toByteArray());
         newDataMap.set(bitpos, true);
-        return new Champ<>(newDataMap, newNodeMap, dst, fromCbor);
+        return new Champ<>(newDataMap, newNodeMap, dst, fromCbor, mirrorBat);
     }
 
     private Champ<V> removeMapping(final int bitpos, final int payloadIndex) {
@@ -584,10 +602,11 @@ public class Champ<V extends Cborable> implements Cborable {
         BitSet newDataMap = BitSet.valueOf(dataMap.toByteArray());
         if (lastInPrefix)
             newDataMap.clear(bitpos);
-        return new Champ<>(newDataMap, nodeMap, dst, fromCbor);
+        return new Champ<>(newDataMap, nodeMap, dst, fromCbor, mirrorBat);
     }
 
-    public <T> CompletableFuture<T> reduceAllMappings(T identity,
+    public <T> CompletableFuture<T> reduceAllMappings(PublicKeyHash owner,
+                                                      T identity,
                                                       BiFunction<T, Pair<ByteArrayWrapper, Optional<V>>, CompletableFuture<T>> consumer,
                                                       ContentAddressedStorage storage) {
         return Futures.reduceAll(Arrays.stream(contents).collect(Collectors.toList()), identity, (res, payload) ->
@@ -600,14 +619,15 @@ public class Champ<V extends Cborable> implements Cborable {
                         CompletableFuture.completedFuture(res)
                 ).thenCompose(newRes ->
                         payload.isShard() && payload.link.isPresent() ?
-                                storage.get((Cid)payload.link.get(), Optional.empty())
+                                storage.get(owner, (Cid)payload.link.get(), Optional.empty())
                                         .thenApply(rawOpt -> Champ.fromCbor(rawOpt.orElseThrow(() -> new IllegalStateException("Hash not present! " + payload.link)), fromCbor))
-                                        .thenCompose(child -> child.reduceAllMappings(newRes, consumer, storage)) :
+                                        .thenCompose(child -> child.reduceAllMappings(owner, newRes, consumer, storage)) :
                                 CompletableFuture.completedFuture(newRes)
                 ), (a, b) -> a);
     }
 
-    public CompletableFuture<Boolean> applyToAllMappings(Function<Pair<ByteArrayWrapper, Optional<V>>, CompletableFuture<Boolean>> mapper,
+    public CompletableFuture<Boolean> applyToAllMappings(PublicKeyHash owner,
+                                                         Function<Pair<ByteArrayWrapper, Optional<V>>, CompletableFuture<Boolean>> mapper,
                                                          ContentAddressedStorage storage) {
         return Futures.combineAll(Arrays.stream(contents).parallel().map(payload ->
                         (! payload.isShard() ?
@@ -619,9 +639,9 @@ public class Champ<V extends Cborable> implements Cborable {
                                 Futures.of(true)
                         ).thenCompose(newRes ->
                                 payload.isShard() && payload.link.isPresent() ?
-                                        storage.get((Cid)payload.link.get(), Optional.empty())
+                                        storage.get(owner, (Cid)payload.link.get(), Optional.empty())
                                                 .thenApply(rawOpt -> Champ.fromCbor(rawOpt.orElseThrow(() -> new IllegalStateException("Hash not present! " + payload.link)), fromCbor))
-                                                .thenCompose(child -> child.applyToAllMappings(mapper, storage)) :
+                                                .thenCompose(child -> child.applyToAllMappings(owner, mapper, storage)) :
                                         Futures.of(true)
                         )).collect(Collectors.toList()))
                 .thenApply(x -> true);
@@ -640,10 +660,10 @@ public class Champ<V extends Cborable> implements Cborable {
                 .collect(Collectors.toList());
     }
 
-    private static <V extends Cborable> Optional<HashPrefixPayload<V>> getElement(int bitIndex,
-                                                                                  int dataIndex,
-                                                                                  int nodeIndex,
-                                                                                  Optional<Champ<V>> c) {
+    public static <V extends Cborable> Optional<HashPrefixPayload<V>> getElement(int bitIndex,
+                                                                                 int dataIndex,
+                                                                                 int nodeIndex,
+                                                                                 Optional<Champ<V>> c) {
         if (! c.isPresent())
             return Optional.empty();
         Champ<V> champ = c.get();
@@ -654,7 +674,7 @@ public class Champ<V extends Cborable> implements Cborable {
         return Optional.empty();
     }
 
-    private static <V extends Cborable> CompletableFuture<Map<Integer, List<KeyElement<V>>>> hashAndMaskKeys(
+    public static <V extends Cborable> CompletableFuture<Map<Integer, List<KeyElement<V>>>> hashAndMaskKeys(
             List<KeyElement<V>> mappings,
             int depth,
             int bitWidth,
@@ -670,104 +690,6 @@ public class Champ<V extends Cborable> implements Cborable {
                         .map(e -> new Pair<>(e.getKey(), e.getValue().stream().map(p -> p.left).collect(Collectors.toList())))
                         .collect(Collectors.toMap(p -> p.left, p -> p.right))
                 );
-    }
-
-    public static <V extends Cborable> CompletableFuture<Boolean> applyToDiff(
-            MaybeMultihash original,
-            MaybeMultihash updated,
-            int depth,
-            Function<ByteArrayWrapper, CompletableFuture<byte[]>> hasher,
-            List<KeyElement<V>> higherLeftMappings,
-            List<KeyElement<V>> higherRightMappings,
-            Consumer<Triple<ByteArrayWrapper, Optional<V>, Optional<V>>> consumer,
-            int bitWidth,
-            ContentAddressedStorage storage,
-            Function<Cborable, V> fromCbor) {
-
-        if (updated.equals(original))
-            return CompletableFuture.completedFuture(true);
-        return original.map(h -> storage.get((Cid)h, Optional.empty())).orElseGet(() -> CompletableFuture.completedFuture(Optional.empty()))
-                .thenApply(rawOpt -> rawOpt.map(y -> Champ.fromCbor(y, fromCbor)))
-                .thenCompose(left -> updated.map(h -> storage.get((Cid)h, Optional.empty())).orElseGet(() -> CompletableFuture.completedFuture(Optional.empty()))
-                        .thenApply(rawOpt -> rawOpt.map(y -> Champ.fromCbor(y, fromCbor)))
-                        .thenCompose(right -> hashAndMaskKeys(higherLeftMappings, depth, bitWidth, hasher)
-                                .thenCompose(leftHigherMappingsByBit -> hashAndMaskKeys(higherRightMappings, depth, bitWidth, hasher)
-                                        .thenCompose(rightHigherMappingsByBit -> {
-
-                            int leftMax = left.map(c -> Math.max(c.dataMap.length(), c.nodeMap.length())).orElse(0);
-                            int rightMax = right.map(c -> Math.max(c.dataMap.length(), c.nodeMap.length())).orElse(0);
-                            int maxBit = Math.max(leftMax, rightMax);
-                            int leftDataIndex = 0, rightDataIndex = 0, leftNodeCount = 0, rightNodeCount = 0;
-
-                            List<CompletableFuture<Boolean>> deeperLayers = new ArrayList<>();
-
-                            for (int i = 0; i < maxBit; i++) {
-                                // either the payload is present OR higher mappings are non empty OR the champ is absent
-                                Optional<HashPrefixPayload<V>> leftPayload = getElement(i, leftDataIndex, leftNodeCount, left);
-                                Optional<HashPrefixPayload<V>> rightPayload = getElement(i, rightDataIndex, rightNodeCount, right);
-
-                                List<KeyElement<V>> leftHigherMappings = leftHigherMappingsByBit.getOrDefault(i, Collections.emptyList());
-                                List<KeyElement<V>> leftMappings = leftPayload
-                                        .filter(p -> !p.isShard())
-                                        .map(p -> Arrays.asList(p.mappings))
-                                        .orElse(leftHigherMappings);
-                                List<KeyElement<V>> rightHigherMappings = rightHigherMappingsByBit.getOrDefault(i, Collections.emptyList());
-                                List<KeyElement<V>> rightMappings = rightPayload
-                                        .filter(p -> !p.isShard())
-                                        .map(p -> Arrays.asList(p.mappings))
-                                        .orElse(rightHigherMappings);
-
-                                Optional<MaybeMultihash> leftShard = leftPayload
-                                        .filter(p -> p.isShard())
-                                        .map(p -> p.link);
-
-                                Optional<MaybeMultihash> rightShard = rightPayload
-                                        .filter(p -> p.isShard())
-                                        .map(p -> p.link);
-
-                                if (leftShard.isPresent() || rightShard.isPresent()) {
-                                    deeperLayers.add(applyToDiff(
-                                            leftShard.orElse(MaybeMultihash.empty()),
-                                            rightShard.orElse(MaybeMultihash.empty()), depth + 1, hasher,
-                                            leftMappings, rightMappings, consumer, bitWidth, storage, fromCbor));
-                                } else {
-                                    Map<ByteArrayWrapper, Optional<V>> leftMap = leftMappings.stream()
-                                            .collect(Collectors.toMap(e -> e.key, e -> e.valueHash));
-                                    Map<ByteArrayWrapper, Optional<V>> rightMap = rightMappings.stream()
-                                            .collect(Collectors.toMap(e -> e.key, e -> e.valueHash));
-
-                                    HashSet<ByteArrayWrapper> both = new HashSet<>(leftMap.keySet());
-                                    both.retainAll(rightMap.keySet());
-
-                                    for (Map.Entry<ByteArrayWrapper, Optional<V>> entry : leftMap.entrySet()) {
-                                        if (! both.contains(entry.getKey()))
-                                            consumer.accept(new Triple<>(entry.getKey(), entry.getValue(), Optional.empty()));
-                                        else if (! entry.getValue().equals(rightMap.get(entry.getKey())))
-                                            consumer.accept(new Triple<>(entry.getKey(), entry.getValue(), rightMap.get(entry.getKey())));
-                                    }
-                                    for (Map.Entry<ByteArrayWrapper, Optional<V>> entry : rightMap.entrySet()) {
-                                        if (! both.contains(entry.getKey()))
-                                            consumer.accept(new Triple<>(entry.getKey(), Optional.empty(), entry.getValue()));
-                                    }
-                                }
-
-                                if (leftPayload.isPresent()) {
-                                    if (leftPayload.get().isShard())
-                                        leftNodeCount++;
-                                    else
-                                        leftDataIndex++;
-                                }
-                                if (rightPayload.isPresent()) {
-                                    if (rightPayload.get().isShard())
-                                        rightNodeCount++;
-                                    else
-                                        rightDataIndex++;
-                                }
-                            }
-
-                            return Futures.combineAll(deeperLayers).thenApply(x -> true);
-                        })))
-        );
     }
 
     @Override
@@ -787,8 +709,7 @@ public class Champ<V extends Cborable> implements Cborable {
         return result;
     }
 
-    @Override
-    public CborObject toCbor() {
+    private CborObject.CborList toCborList() {
         return new CborObject.CborList(Arrays.asList(
                 new CborObject.CborByteArray(dataMap.toByteArray()),
                 new CborObject.CborByteArray(nodeMap.toByteArray()),
@@ -807,7 +728,26 @@ public class Champ<V extends Cborable> implements Cborable {
         ));
     }
 
+    @Override
+    public CborObject toCbor() {
+        if (mirrorBat.isPresent()) {
+            SortedMap<String, Cborable> state = new TreeMap<>();
+            state.put("d", toCborList());
+            state.put("bats", new CborObject.CborList(Arrays.asList(mirrorBat.get())));
+            return CborObject.CborMap.build(state);
+        }
+        return toCborList();
+    }
+
     public static <V extends Cborable> Champ<V> fromCbor(Cborable cbor, Function<Cborable, V> fromCbor) {
+        if (cbor instanceof CborObject.CborMap) {
+            Optional<BatId> mirrorBat = ((CborObject.CborMap) cbor).getList("bats", BatId::fromCbor).stream().findFirst();
+            return fromCborList(((CborObject.CborMap) cbor).get("d"), fromCbor).withBat(mirrorBat);
+        }
+        return fromCborList(cbor, fromCbor);
+    }
+
+    public static <V extends Cborable> Champ<V> fromCborList(Cborable cbor, Function<Cborable, V> fromCbor) {
         if (! (cbor instanceof CborObject.CborList))
             throw new IllegalStateException("Invalid cbor for CHAMP! " + cbor);
         List<? extends Cborable> list = ((CborObject.CborList) cbor).value;
@@ -837,6 +777,6 @@ public class Champ<V extends Cborable> implements Cborable {
                 contents.add(new HashPrefixPayload<>(MaybeMultihash.of(((CborObject.CborMerkleLink)keyOrHash).target)));
             }
         }
-        return new Champ<>(dataMap, nodeMap, contents.toArray(new HashPrefixPayload[contents.size()]), fromCbor);
+        return new Champ<>(dataMap, nodeMap, contents.toArray(new HashPrefixPayload[contents.size()]), fromCbor, Optional.empty());
     }
 }

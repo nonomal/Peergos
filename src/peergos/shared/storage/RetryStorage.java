@@ -2,12 +2,14 @@ package peergos.shared.storage;
 
 import peergos.shared.cbor.CborObject;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.Multihash;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.auth.*;
-import peergos.shared.user.fs.FragmentWithHash;
+import peergos.shared.user.fs.*;
 import peergos.shared.util.*;
 
+import java.net.*;
+import java.time.*;
 import java.util.List;
 import java.util.Optional;
 import java.util.Random;
@@ -18,9 +20,9 @@ import java.util.function.Supplier;
 
 public class RetryStorage implements ContentAddressedStorage {
 
-    private final Random random = new Random(1);
+    private static final Random random = new Random(1);
+    private static final ScheduledThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(1);
     private final ContentAddressedStorage target;
-    private final ScheduledThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(1);
     private final int maxAttempts;
 
     public RetryStorage(ContentAddressedStorage target, int maxAttempts) {
@@ -33,19 +35,23 @@ public class RetryStorage implements ContentAddressedStorage {
         return new RetryStorage(target.directToOrigin(), maxAttempts);
     }
 
-    private <V> void retryAfter(Supplier<CompletableFuture<V>> method, int milliseconds) {
+    private static <V> void retryAfter(Supplier<CompletableFuture<V>> method, int milliseconds) {
         executor.schedule(method::get, milliseconds, TimeUnit.MILLISECONDS);
     }
 
-    private int jitter(int minMilliseconds, int rangeMilliseconds) {
+    private static int jitter(int minMilliseconds, int rangeMilliseconds) {
         return minMilliseconds + random.nextInt(rangeMilliseconds);
     }
 
     private <V> CompletableFuture<V> runWithRetry(Supplier<CompletableFuture<V>> f) {
-        return recurse(maxAttempts, f);
+        return recurse(maxAttempts, maxAttempts, f);
     }
 
-    private <V> CompletableFuture<V> recurse(int retriesLeft, Supplier<CompletableFuture<V>> f) {
+    public static <V> CompletableFuture<V> runWithRetry(int maxAttempts, Supplier<CompletableFuture<V>> f) {
+        return recurse(maxAttempts, maxAttempts, f);
+    }
+
+    private static <V> CompletableFuture<V> recurse(int retriesLeft, int maxAttempts, Supplier<CompletableFuture<V>> f) {
         CompletableFuture<V> res = new CompletableFuture<>();
         try {
             f.get()
@@ -57,8 +63,10 @@ public class RetryStorage implements ContentAddressedStorage {
                             res.completeExceptionally(e);
                         } else if (e instanceof HttpFileNotFoundException) {
                             res.completeExceptionally(e);
+                        } else if (e instanceof ConnectException) {
+                            res.completeExceptionally(e);
                         } else {
-                            retryAfter(() -> recurse(retriesLeft - 1, f)
+                            retryAfter(() -> recurse(retriesLeft - 1, maxAttempts, f)
                                             .thenAccept(res::complete)
                                             .exceptionally(t -> {
                                                 res.completeExceptionally(t);
@@ -75,11 +83,21 @@ public class RetryStorage implements ContentAddressedStorage {
     }
     @Override
     public CompletableFuture<BlockStoreProperties> blockStoreProperties() {
-        return runWithRetry(() -> target.blockStoreProperties());
+        return runWithRetry(target::blockStoreProperties);
     }
     @Override
     public CompletableFuture<Cid> id() {
-        return runWithRetry(() -> target.id());
+        return runWithRetry(target::id);
+    }
+
+    @Override
+    public CompletableFuture<List<Cid>> ids() {
+        return runWithRetry(target::ids);
+    }
+
+    @Override
+    public CompletableFuture<String> linkHost(PublicKeyHash owner) {
+        return runWithRetry(() -> target.linkHost(owner));
     }
 
     @Override
@@ -98,8 +116,8 @@ public class RetryStorage implements ContentAddressedStorage {
     }
 
     @Override
-    public CompletableFuture<Optional<CborObject>> get(Cid hash, Optional<BatWithId> bat) {
-        return runWithRetry(() -> target.get(hash, bat));
+    public CompletableFuture<Optional<CborObject>> get(PublicKeyHash owner, Cid hash, Optional<BatWithId> bat) {
+        return runWithRetry(() -> target.get(owner, hash, bat));
     }
 
     @Override
@@ -113,18 +131,33 @@ public class RetryStorage implements ContentAddressedStorage {
     }
 
     @Override
-    public CompletableFuture<Optional<byte[]>> getRaw(Cid hash, Optional<BatWithId> bat) {
-        return runWithRetry(() -> target.getRaw(hash, bat));
+    public CompletableFuture<Optional<byte[]>> getRaw(PublicKeyHash owner, Cid hash, Optional<BatWithId> bat) {
+        return runWithRetry(() -> target.getRaw(owner, hash, bat));
     }
 
     @Override
-    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat) {
-        return runWithRetry(() -> target.getChampLookup(owner, root, champKey, bat));
+    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat, Optional<Cid> committedRoot) {
+        return runWithRetry(() -> target.getChampLookup(owner, root, champKey, bat,committedRoot));
+    }
+
+    @Override
+    public CompletableFuture<EncryptedCapability> getSecretLink(SecretLink link) {
+        return runWithRetry(() -> target.getSecretLink(link));
+    }
+
+    @Override
+    public CompletableFuture<LinkCounts> getLinkCounts(String owner, LocalDateTime after, BatWithId mirrorBat) {
+        return runWithRetry(() -> target.getLinkCounts(owner, after, mirrorBat));
     }
 
     @Override
     public CompletableFuture<Optional<Integer>> getSize(Multihash block) {
         return runWithRetry(() -> target.getSize(block));
+    }
+
+    @Override
+    public CompletableFuture<IpnsEntry> getIpnsEntry(Multihash signer) {
+        return runWithRetry(() -> target.getIpnsEntry(signer));
     }
 
     @Override
@@ -147,8 +180,9 @@ public class RetryStorage implements ContentAddressedStorage {
                                                             PublicKeyHash writer,
                                                             List<byte[]> signedHashes,
                                                             List<Integer> blockSizes,
+                                                            List<List<BatId>> batIds,
                                                             boolean isRaw,
                                                             TransactionId tid) {
-        return runWithRetry(() -> target.authWrites(owner, writer, signedHashes, blockSizes, isRaw, tid));
+        return runWithRetry(() -> target.authWrites(owner, writer, signedHashes, blockSizes, batIds, isRaw, tid));
     }
 }

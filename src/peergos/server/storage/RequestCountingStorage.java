@@ -2,8 +2,7 @@ package peergos.server.storage;
 
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
 import peergos.shared.storage.*;
 import peergos.shared.storage.auth.*;
 import peergos.shared.util.*;
@@ -64,8 +63,8 @@ public class RequestCountingStorage extends DelegatingStorage {
     }
 
     @Override
-    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat) {
-        return target.getChampLookup(owner, root, champKey, bat)
+    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat, Optional<Cid> committedRoot) {
+        return target.getChampLookup(owner, root, champKey, bat, committedRoot)
                 .thenApply(blocks -> {
                     champGet.incrementAndGet();
                     return blocks;
@@ -86,8 +85,8 @@ public class RequestCountingStorage extends DelegatingStorage {
     }
 
     @Override
-    public CompletableFuture<Optional<CborObject>> get(Cid key, Optional<BatWithId> bat) {
-        return target.get(key, bat).thenApply(cborOpt -> {
+    public CompletableFuture<Optional<CborObject>> get(PublicKeyHash owner, Cid key, Optional<BatWithId> bat) {
+        return target.get(owner, key, bat).thenApply(cborOpt -> {
             get.incrementAndGet();
             return cborOpt;
         });
@@ -108,8 +107,8 @@ public class RequestCountingStorage extends DelegatingStorage {
     }
 
     @Override
-    public CompletableFuture<Optional<byte[]>> getRaw(Cid key, Optional<BatWithId> bat) {
-        return target.getRaw(key, bat).thenApply(rawOpt -> {
+    public CompletableFuture<Optional<byte[]>> getRaw(PublicKeyHash owner, Cid key, Optional<BatWithId> bat) {
+        return target.getRaw(owner, key, bat).thenApply(rawOpt -> {
             getRaw.incrementAndGet();
             return rawOpt;
         });

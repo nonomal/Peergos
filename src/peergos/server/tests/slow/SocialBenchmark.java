@@ -38,10 +38,10 @@ public class SocialBenchmark {
 
     private static Pair<UserService, NetworkAccess> buildHttpNetworkAccess(boolean useIpfs, Random r) throws Exception {
         Args args = UserTests.buildArgs().with("useIPFS", "" + useIpfs);
-        UserService service = Main.PKI_INIT.main(args);
-        NetworkAccess net = Builder.buildJavaNetworkAccess(new URL("http://localhost:" + args.getInt("port")), false).join();
+        UserService service = Main.PKI_INIT.main(args).localApi;
+        NetworkAccess net = Builder.buildJavaNetworkAccess(new URL("http://localhost:" + args.getInt("port")), false, Optional.empty()).join();
         int delayMillis = 50;
-        NetworkAccess delayed = DelayingStorage.buildNetwork(net, delayMillis, delayMillis);
+        NetworkAccess delayed = net.withStorage(s -> new DelayingStorage(s, delayMillis, delayMillis));
         return new Pair<>(service, delayed);
     }
 
@@ -186,7 +186,7 @@ public class SocialBenchmark {
         for (int i=0; i < nFriendsLeaving; i++) {
             int index = random.nextInt(friends.size());
             UserContext friend = friends.get(index);
-            friend.deleteAccount(otherUsers.get(index).right).join();
+            friend.deleteAccount(otherUsers.get(index).right, UserTests::noMfa).join();
             friends.remove(friend);
         }
 

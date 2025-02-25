@@ -3,25 +3,39 @@ package peergos.server.cli;
 import org.jline.builtins.*;
 import org.jline.reader.*;
 import org.jline.reader.impl.*;
+import org.jline.reader.impl.completer.AggregateCompleter;
+import org.jline.reader.impl.completer.ArgumentCompleter;
+import org.jline.reader.impl.completer.NullCompleter;
 import org.jline.reader.impl.completer.StringsCompleter;
 import org.jline.terminal.*;
 import org.jline.utils.*;
 
 import peergos.server.*;
+import peergos.server.crypto.hash.ScryptJava;
 import peergos.server.simulation.*;
 import peergos.server.simulation.FileSystem;
-import peergos.server.util.Logging;
+import peergos.server.user.*;
+import peergos.server.util.*;
 import peergos.shared.*;
+import peergos.shared.cbor.*;
+import peergos.shared.corenode.HTTPCoreNode;
+import peergos.shared.login.mfa.*;
+import peergos.shared.mutable.HttpMutablePointers;
 import peergos.shared.social.FollowRequestWithCipherText;
-import peergos.shared.user.SocialState;
-import peergos.shared.user.UserContext;
+import peergos.shared.social.HttpSocialNetwork;
+import peergos.shared.storage.HttpSpaceUsage;
+import peergos.shared.user.*;
 import peergos.shared.user.fs.*;
 import peergos.shared.util.*;
 
 import java.io.*;
 import java.net.*;
 import java.nio.file.*;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.*;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 import java.util.function.*;
 import java.util.logging.Level;
@@ -31,9 +45,21 @@ import static org.jline.builtins.Completers.TreeCompleter.node;
 
 public class CLI implements Runnable {
 
+    private static void disableLogSpam() {
+        // disable log spam
+        TrieNodeImpl.disableLog();
+        HttpMutablePointers.disableLog();
+        NetworkAccess.disableLog();
+        HTTPCoreNode.disableLog();
+        HttpSocialNetwork.disableLog();
+        HttpSpaceUsage.disableLog();
+        FileUploader.disableLog();
+        LazyInputStreamCombiner.disableLog();
+    }
+
     private final CLIContext cliContext;
     private final FileSystem peergosFileSystem;
-    private final ListFilesCompleter remoteFilesCompleter, localFilesCompleter, remoteDirsCompleter;
+    private final ListFilesCompleter remoteFilesCompleter, localFilesCompleter, remoteDirsCompleter, localDirsCompleter;
     private final Completer allUsernamesCompleter, followersCompleter, pendingFollowersCompleter, processFollowRequestCompleter;
     private volatile boolean isFinished;
 
@@ -42,7 +68,8 @@ public class CLI implements Runnable {
         this.peergosFileSystem = new PeergosFileSystemImpl(cliContext.userContext);
         this.remoteFilesCompleter = new ListFilesCompleter(path -> this.remoteFilesLsFiles(path, false));
         this.remoteDirsCompleter = new ListFilesCompleter(path -> this.remoteFilesLsFiles(path, true));
-        this.localFilesCompleter = new ListFilesCompleter(this::localFilesLsFiles);
+        this.localFilesCompleter = new ListFilesCompleter(path -> this.localFilesLsFiles(path, false));
+        this.localDirsCompleter = new ListFilesCompleter(path -> this.localFilesLsFiles(path, true));
         this.allUsernamesCompleter = new SupplierCompleter(this::listAllUsernames);
         this.followersCompleter = new SupplierCompleter(this::listFollowers);
         this.pendingFollowersCompleter = new SupplierCompleter(this::listPendingFollowers);
@@ -70,7 +97,7 @@ public class CLI implements Runnable {
     }
 
     public Path resolveToPath(String arg) {
-        return resolveToPath(arg, Paths.get(""));
+        return resolveToPath(arg, cliContext.lpwd);
     }
 
     public static ParsedCommand fromLine(String line) {
@@ -110,10 +137,14 @@ public class CLI implements Runnable {
             switch (parsedCommand.cmd) {
                 case ls:
                     return ls(parsedCommand);
+                case lls:
+                    return lls(parsedCommand);
                 case get:  // download
                     return get(parsedCommand, terminal.writer());
                 case put:  //upload
                     return put(parsedCommand, terminal.writer());
+                case mkdir:
+                    return mkdir(parsedCommand);
                 case rm:
                     return rm(parsedCommand);
                 case exit:
@@ -137,6 +168,8 @@ public class CLI implements Runnable {
                     return shareReadAccess(parsedCommand);
                 case cd:
                     return cd(parsedCommand);
+                case lcd:
+                    return lcd(parsedCommand);
                 case pwd:
                     return pwd(parsedCommand);
                 case lpwd:
@@ -152,7 +185,6 @@ public class CLI implements Runnable {
 
     }
 
-
     public String ls(ParsedCommand cmd) {
 
         String pathArg = cmd.hasArguments() ? cmd.firstArgument() : "";
@@ -163,6 +195,23 @@ public class CLI implements Runnable {
             return peergosFileSystem.ls(path, false).stream()
                 .map(Path::toString)
                 .collect(Collectors.joining("\n"));
+
+        return path.toString();
+    }
+
+    public String lls(ParsedCommand cmd) {
+
+        String localPathArg = cmd.hasArguments() ? cmd.firstArgument() : "";
+        Path path = resolveToPath(localPathArg).toAbsolutePath().normalize();
+
+        try {
+            if (path.toFile().isDirectory())
+                return Files.list(path)
+                        .map(Path::toString)
+                        .collect(Collectors.joining("\n"));
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
 
         return path.toString();
     }
@@ -184,9 +233,6 @@ public class CLI implements Runnable {
         Path remotePath = resolvedRemotePath(cmd.firstArgument()).toAbsolutePath().normalize();
 
         Stat stat = checkPath(remotePath);
-        // TODO
-        if (stat.fileProperties().isDirectory)
-            throw new IllegalStateException("Directory is not supported");
 
         String localPathArg = cmd.hasSecondArgument() ? cmd.secondArgument() : "";
         Path localPath = resolveToPath(localPathArg).toAbsolutePath();
@@ -196,16 +242,65 @@ public class CLI implements Runnable {
         else if (!localPath.toFile().getParentFile().isDirectory())
             throw new IllegalStateException("Specified local path '" + localPath.getParent() + "' is not a directory or does not exist.");
 
-        ProgressBar pb = new ProgressBar(new AtomicLong(0), new AtomicLong(1), remotePath.getParent(), remotePath.getFileName().toString());
-        BiConsumer<Long, Long> progressConsumer = (bytes, size) -> pb.update(writerForProgress, bytes, size);
+        if (stat.fileProperties().isDirectory) {
+            boolean skipExisting = cmd.flags.contains(Command.Flag.SKIP_EXISTING.flag);
+            copyDir(remotePath, localPath.getParent(), skipExisting, writerForProgress);
+            return "Downloaded " + remotePath + " to " + localPath;
+        } else {
+            ProgressBar pb = new ProgressBar(new AtomicLong(0), new AtomicLong(1), remotePath.getParent(), remotePath.getFileName().toString());
+            BiConsumer<Long, Long> progressConsumer = (bytes, size) -> pb.update(writerForProgress, bytes, size);
 
-        byte[] data = peergosFileSystem.read(remotePath, progressConsumer);
-        writerForProgress.println();
-        writerForProgress.flush();
+            AsyncReader reader = peergosFileSystem.reader(remotePath);
+            byte[] buf = new byte[Chunk.MAX_SIZE];
+            FileOutputStream fout = new FileOutputStream(localPath.toFile());
+            long fileSize = stat.fileProperties().size;
+            for (long offset = 0; offset < fileSize;) {
+                int read = reader.readIntoArray(buf, 0, Math.min(buf.length, (int) (fileSize - offset))).join();
+                fout.write(buf, 0, read);
+                offset += read;
+                progressConsumer.accept(offset, fileSize);
+            }
+            writerForProgress.println();
+            writerForProgress.flush();
+            return "Downloaded " + remotePath + " to " + localPath;
+        }
+    }
 
-        Files.write(localPath, data);
+    private void copyDir(Path remote, Path local, boolean skipExisting, PrintWriter writerForProgress) throws IOException {
+        String dirName = remote.getFileName().toString();
+        Path localDir = local.resolve(dirName);
+        if (! localDir.toFile().exists())
+            localDir.toFile().mkdirs();
+        if (! localDir.toFile().isDirectory())
+            throw new IllegalStateException(localDir + " already exists and is a file not a directory!");
+        List<Path> remoteChildren = peergosFileSystem.ls(remote);
+        for (Path remoteChild : remoteChildren) {
+            Stat stat = peergosFileSystem.stat(remoteChild);
+            if (stat.fileProperties().isDirectory) {
+                copyDir(remoteChild, localDir, skipExisting, writerForProgress);
+            } else {
+                ProgressBar pb = new ProgressBar(new AtomicLong(0), new AtomicLong(1), remoteChild.getParent(), remoteChild.getFileName().toString());
+                BiConsumer<Long, Long> progressConsumer = (bytes, size) -> pb.update(writerForProgress, bytes, size);
 
-        return "Downloaded " + remotePath + " to " + localPath;
+                File localFile = localDir.resolve(remoteChild.getFileName()).toFile();
+                if (localFile.exists() && skipExisting) {
+                    writerForProgress.println("Skipping " + localFile);
+                    continue;
+                }
+                FileOutputStream fout = new FileOutputStream(localFile);
+                long fileSize = stat.fileProperties().size;
+                AsyncReader reader = peergosFileSystem.reader(remoteChild);
+                byte[] buf = new byte[Chunk.MAX_SIZE];
+                for (long offset = 0; offset < fileSize;) {
+                    int read = reader.readIntoArray(buf, 0, Math.min(buf.length, (int) (fileSize - offset))).join();
+                    fout.write(buf, 0, read);
+                    offset += read;
+                    progressConsumer.accept(offset, fileSize);
+                }
+                writerForProgress.println();
+                writerForProgress.flush();
+            }
+        }
     }
 
     private List<String> convert(Path p) {
@@ -233,10 +328,15 @@ public class CLI implements Runnable {
                                                                         AtomicLong fileCount,
                                                                         ProgressCreator progressCreator) {
         try {
-            List<FileWrapper.FileUploadProperties> files = Files.list(localDir).filter(p -> p.toFile().isFile())
-                    .map(p -> new FileWrapper.FileUploadProperties(p.getFileName().toString(), reader(p.toFile()),
-                            (int) (p.toFile().length() >> 32), (int) p.toFile().length(), skipExisting, true,
-                            progressCreator.create(remoteRelativeDir, p.getFileName().toString(), p.toFile().length())))
+            List<FileWrapper.FileUploadProperties> files = Files.list(localDir)
+                    .filter(p -> p.toFile().isFile())
+                    .map(p -> {
+                        long fileSize = p.toFile().length();
+                        LocalDateTime modified = LocalDateTime.ofInstant(Instant.ofEpochSecond(p.toFile().lastModified() / 1000, 0), ZoneOffset.UTC);
+                        return new FileWrapper.FileUploadProperties(p.getFileName().toString(), () -> reader(p.toFile()),
+                                (int) (fileSize >> 32), (int) fileSize, Optional.of(modified), Optional.of(ScryptJava.hashFile(p, cliContext.userContext.crypto.hasher)), skipExisting, true,
+                                progressCreator.create(remoteRelativeDir, p.getFileName().toString(), Math.max(4096, fileSize)));
+                    })
                     .collect(Collectors.toList());
             fileCount.addAndGet(files.size());
             FileWrapper.FolderUploadProperties dir = new FileWrapper.FolderUploadProperties(convert(remoteRelativeDir), files);
@@ -255,7 +355,7 @@ public class CLI implements Runnable {
 
         if (localPath.toFile().isDirectory()) {
             Path remotePath = cmd.hasSecondArgument() ? cliContext.pwd.resolve(Paths.get(cmd.secondArgument())) : cliContext.pwd;
-            boolean skipExisting = cmd.hasThirdArgument() && cmd.thirdArgument().equalsIgnoreCase("true");
+            boolean skipExisting = cmd.flags.contains(Command.Flag.SKIP_EXISTING.flag);
             AtomicLong fileCount = new AtomicLong(0);
             AtomicLong doneFiles = new AtomicLong(0);
             peergosFileSystem.writeSubtree(remotePath, parseLocalFolder(localPath.getFileName(), localPath, skipExisting, fileCount,
@@ -275,6 +375,14 @@ public class CLI implements Runnable {
             writerForProgress.flush();
             return "Successfully uploaded " + localPath + " to remote " + remotePath;
         }
+    }
+
+    public String mkdir(ParsedCommand cmd) throws IOException {
+        String remoteDirArg = cmd.firstArgument();
+        Path remoteDirPath = cliContext.pwd.resolve(remoteDirArg);
+        peergosFileSystem.mkdir(remoteDirPath);
+
+        return "\nSuccessfully created " + remoteDirPath;
     }
 
     public String rm(ParsedCommand cmd) {
@@ -315,7 +423,7 @@ public class CLI implements Runnable {
         terminal.writer().println("Enter new  password:");
         String newPassword = reader.readLine(PROMPT, PASSWORD_MASK);
         try {
-            cliContext.userContext.changePassword(currentPassword, newPassword).join();
+            cliContext.userContext.changePassword(currentPassword, newPassword, methods -> mfa(methods, terminal.writer(), reader)).join();
         } catch (Exception ex) {
             ex.printStackTrace();
             return "Failed to update password";
@@ -433,6 +541,8 @@ public class CLI implements Runnable {
 
     public String cd(ParsedCommand cmd) {
         String remotePathArg = cmd.hasArguments() ? cmd.firstArgument() : "";
+        if (! cmd.hasArguments()) // no args goes to home
+            cliContext.pwd = cliContext.home;
         Path remotePathToCdTo = resolvedRemotePath(remotePathArg).toAbsolutePath().normalize(); // normalize handles ".." etc.
 
         Stat stat = checkPath(remotePathToCdTo);
@@ -442,12 +552,22 @@ public class CLI implements Runnable {
         return "Current directory : " + remotePathToCdTo;
     }
 
+    public String lcd(ParsedCommand cmd) {
+        String localPathArg = cmd.hasArguments() ? cmd.firstArgument() : "";
+        Path localPathToCdTo = resolveToPath(localPathArg).toAbsolutePath().normalize(); // normalize handles ".." etc.
+
+        if (!localPathToCdTo.toFile().isDirectory())
+            return "Specified path '" + localPathToCdTo + "' is not a directory";
+        cliContext.lpwd = localPathToCdTo;
+        return "Current local directory : " + localPathToCdTo;
+    }
+
     public String pwd(ParsedCommand cmd) {
         return "Remote working directory: " + cliContext.pwd.toString();
     }
 
     public String lpwd(ParsedCommand cmd) {
-        return "Local working directory: " + System.getProperty("user.dir");
+        return "Local working directory: " + cliContext.lpwd.toString();
     }
 
 
@@ -468,20 +588,23 @@ public class CLI implements Runnable {
                 .append(" > ").toAnsi();
     }
 
-    private List<String> localFilesLsFiles(String pathArgument) {
+    private List<String> localFilesLsFiles(String pathArgument, boolean filterDirs) {
         try {
             Path path = resolveToPath(pathArgument).toAbsolutePath();
-            if (path.toFile().isFile())
+            if (path.toFile().isFile() && !filterDirs)
                 return Arrays.asList(path.toString());
-            if (path.toFile().isDirectory())
+            if (path.toFile().isDirectory() && filterDirs)
+                return Arrays.asList(path.toString());
+            if (path.toFile().isDirectory() && !filterDirs)
                 return Files.list(path)
                         .map(Path::toString)
                         .collect(Collectors.toList());
 
-            if (!path.getParent().toFile().isDirectory())
+            if (path.getParent().toFile().isDirectory())
                 return Files.list(path.getParent())
-                .map(Path::toString)
-                .collect(Collectors.toList());
+                        .filter(p -> !filterDirs || p.toFile().isDirectory())
+                        .map(Path::toString)
+                        .collect(Collectors.toList());
 
         } catch (IOException ioe) {
             ioe.printStackTrace();
@@ -551,6 +674,8 @@ public class CLI implements Runnable {
                 return remoteDirsCompleter;
             case LOCAL_FILE:
                 return localFilesCompleter;
+            case LOCAL_DIR:
+                return localDirsCompleter;
             case USERNAME:
                 return allUsernamesCompleter;
             case FOLLOWER:
@@ -564,29 +689,33 @@ public class CLI implements Runnable {
         }
     }
 
-    private Completers.TreeCompleter.Node buildCompletionNode(Command cmd) {
-        if (cmd.secondArg  != null) {
-            return node(cmd.name(),
-                        node(getCompleter(cmd.firstArg),
-                                node(getCompleter(cmd.secondArg))));
-
+    private Completer buildCompletionNode(Command cmd) {
+        if (cmd.secondArg != null) {
+            Completer arg1 = getCompleter(cmd.firstArg);
+            Completer arg2 = getCompleter(cmd.secondArg);
+            return new ArgumentCompleter(
+                    new StringsCompleter(cmd.name()),
+                    new Completers.OptionCompleter(List.of(arg1, arg2, NullCompleter.INSTANCE),
+                            cmd.flags.stream()
+                            .map(f -> new Completers.OptDesc(f.flag, f.flag))
+                            .collect(Collectors.toList()), 1)
+            );
         }
         else if (cmd.firstArg !=  null) {
-            return node(cmd.name(),
-                    node(getCompleter(cmd.firstArg)));
+            return new ArgumentCompleter(
+                    new StringsCompleter(cmd.name()), getCompleter(cmd.firstArg));
         }
         else
-            return node(cmd.name());
-
+            return new ArgumentCompleter(new StringsCompleter(cmd.name()));
     }
 
     public Completer buildCompleter() {
 
-        List<Completers.TreeCompleter.Node> nodes = Stream.of(Command.values())
+        List<Completer> cmds = Stream.of(Command.values())
                 .map(this::buildCompletionNode)
                 .collect(Collectors.toList());
 
-        return new Completers.TreeCompleter(nodes);
+        return new AggregateCompleter(cmds);
     }
 
     /**
@@ -595,7 +724,7 @@ public class CLI implements Runnable {
      * @return
      */
 
-    public static CLIContext buildContextFromCLI() {
+    public static CLIContext buildContextFromCLI(Args args) {
         Terminal terminal = buildTerminal();
 
         DefaultParser parser = new DefaultParser();
@@ -609,7 +738,9 @@ public class CLI implements Runnable {
                         "http://localhost:8000"))
                 .build();
 
-        String address = reader.readLine("Enter Server address \n > ").trim();
+        String address = args.hasArg("peergos-url") ?
+                args.getArg("peergos-url") :
+                reader.readLine("Enter Server address \n > ").trim();
         URL serverURL = null;
 
         final PrintWriter writer = terminal.writer();
@@ -618,39 +749,56 @@ public class CLI implements Runnable {
         } catch (MalformedURLException ex) {
             writer.println("Specified server " + address + " is not valid!");
             writer.flush();
-            return buildContextFromCLI();
+            System.exit(1);
         }
 
-        writer.println("Enter username");
-        String username = reader.readLine(PROMPT).trim();
+        String username = args.hasArg("username") ?
+                args.getArg("username") :
+                reader.readLine("Enter username" + PROMPT).trim();
 
-        NetworkAccess networkAccess = Builder.buildJavaNetworkAccess(serverURL, ! serverURL.getHost().equals("localhost")).join();
+        NetworkAccess network = Builder.buildJavaNetworkAccess(serverURL, address.startsWith("https"), Optional.of("Peergos-" + UserService.CURRENT_VERSION + "-shell")).join();
         Consumer<String> progressConsumer =  msg -> {
             writer.println(msg);
             writer.flush();
             return;
         };
 
-        boolean isRegistered = networkAccess.isUsernameRegistered(username).join();
+        boolean isRegistered = network.isUsernameRegistered(username).join();
         if (! isRegistered) {
-            writer.println("To create account, enter password,");
-            writer.println("we recommend a random alphanumeric password longer than 12 characters");
-            String password = reader.readLine(PROMPT, PASSWORD_MASK);
+            String password = Passwords.generate();
+            writer.println("Generated password: " + password);
             writer.println("Re-enter password");
             String password2 = reader.readLine(PROMPT, PASSWORD_MASK);
             if (! password.equals(password2)) {
                 writer.println("Passwords don't match!");
                 System.exit(0);
             }
+            writer.println("Enter any signup token (or press enter if none):");
+            String token = reader.readLine(PROMPT).trim();;
 
-            UserContext userContext = UserContext.signUp(username, password, "", networkAccess, CRYPTO, progressConsumer).join();
-            return new CLIContext(userContext, serverURL.toString(), username);
+            UserContext userContext = UserContext.signUp(username, password, token, Optional.empty(), s -> {},
+                    Optional.empty(), network, CRYPTO, progressConsumer).join();
+            return new CLIContext(terminal, userContext, serverURL.toString(), username);
         } else {
-            writer.println("Enter password for '" + username + "'");
-            String password = reader.readLine(PROMPT, PASSWORD_MASK);
-            UserContext userContext = UserContext.signIn(username, password, networkAccess, CRYPTO, progressConsumer).join();
-            return new CLIContext(userContext, serverURL.toString(), username);
+            String password = args.hasArg("PEERGOS_PASSWORD") ?
+                    args.getArg("PEERGOS_PASSWORD") :
+                    reader.readLine("Enter password for '" + username + "'" + PROMPT, PASSWORD_MASK);
+            UserContext userContext = UserContext.signIn(username, password,
+                    methods -> mfa(methods, writer, reader), false, network, CRYPTO, progressConsumer).join();
+            return new CLIContext(terminal, userContext, serverURL.toString(), username);
         }
+    }
+
+    private static CompletableFuture<MultiFactorAuthResponse> mfa(MultiFactorAuthRequest req,
+                                                                  PrintWriter writer,
+                                                                  LineReader reader) {
+        Optional<MultiFactorAuthMethod> anyTotp = req.methods.stream().filter(m -> m.type == MultiFactorAuthMethod.Type.TOTP).findFirst();
+        if (anyTotp.isEmpty())
+            throw new IllegalStateException("No supported 2 factor auth method! " + req.methods);
+        MultiFactorAuthMethod totp = anyTotp.get();
+        writer.println("Enter TOTP code for login");
+        String code = reader.readLine(PROMPT).trim();
+        return Futures.of(new MultiFactorAuthResponse(totp.credentialId, Either.a(code)));
     }
 
     public static Terminal buildTerminal() {
@@ -666,13 +814,12 @@ public class CLI implements Runnable {
 
     @Override
     public void run() {
-
-        Terminal terminal = buildTerminal();
         DefaultParser parser = new DefaultParser();
         LineReader reader = LineReaderBuilder.builder()
-                .terminal(terminal)
+                .terminal(cliContext.terminal)
                 .completer(buildCompleter())
                 .parser(parser)
+                .option(LineReader.Option.DISABLE_EVENT_EXPANSION, true)
 //                .variable(LineReader.SECONDARY_PROMPT_PATTERN, "%M%P > ")
                 .build();
         boolean color = true;
@@ -699,26 +846,28 @@ public class CLI implements Runnable {
                     continue;
                 }
 
-                String response = handle(parsedCommand, terminal, reader);
+                String response = handle(parsedCommand, cliContext.terminal, reader);
 //                if (color) {
 //                    terminal.writer().println(
 //                            AttributedString.fromAnsi("\u001B[0m\"" + response + "\"")
 //                                    .toAnsi(terminal));
 //
 //                } else {
-                terminal.writer().println(response);
+                cliContext.terminal.writer().println(response);
 //                }
-                terminal.flush();
+                cliContext.terminal.flush();
             }
         }
     }
 
     private static Crypto CRYPTO;
 
-    public static void main(String[] args) {
+    public static void buildAndRun(Args args) {
         CRYPTO = Main.initCrypto();
+        disableLogSpam();
+        ThumbnailGenerator.setInstance(new JavaImageThumbnailer());
         Logging.LOG().setLevel(Level.WARNING);
-        CLIContext cliContext = buildContextFromCLI();
+        CLIContext cliContext = buildContextFromCLI(args);
         new CLI(cliContext).run();
     }
 }

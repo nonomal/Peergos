@@ -1,4 +1,5 @@
 package peergos.server.tests;
+import java.net.URLDecoder;
 import java.time.*;
 import java.util.concurrent.atomic.*;
 import java.util.logging.*;
@@ -7,7 +8,10 @@ import peergos.server.crypto.asymmetric.curve25519.*;
 import peergos.server.crypto.hash.*;
 import peergos.server.crypto.random.*;
 import peergos.server.crypto.symmetric.*;
+import peergos.server.messages.*;
+import peergos.server.sync.DirectorySync;
 import peergos.server.tests.util.*;
+import peergos.server.user.*;
 import peergos.server.util.*;
 
 import org.junit.*;
@@ -20,8 +24,10 @@ import peergos.shared.crypto.asymmetric.*;
 import peergos.shared.crypto.hash.*;
 import peergos.shared.crypto.symmetric.*;
 import peergos.server.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
+import peergos.shared.io.ipfs.bases.Charsets;
+import peergos.shared.login.mfa.*;
 import peergos.shared.mutable.*;
 import peergos.shared.storage.*;
 import peergos.shared.storage.auth.*;
@@ -41,6 +47,9 @@ import java.util.stream.*;
 
 public abstract class UserTests {
 	private static final Logger LOG = Logging.LOG();
+    static {
+        ThumbnailGenerator.setInstance(new JavaImageThumbnailer());
+    }
 
     public static int RANDOM_SEED = 666;
     protected final NetworkAccess network;
@@ -59,22 +68,20 @@ public abstract class UserTests {
     public static Args buildArgs() {
         try {
             Path peergosDir = Files.createTempDirectory("peergos");
-            Random r = new Random();
-            int port = 9000 + r.nextInt(8000);
-            int allowPort = 9000 + r.nextInt(8000);
-            int proxyPort = 9000 + r.nextInt(8000);
-            int gatewayPort = 9000 + r.nextInt(8000);
-            int ipfsApiPort = 9000 + r.nextInt(50_000);
-            int ipfsGatewayPort = 9000 + r.nextInt(50_000);
-            int ipfsSwarmPort = 9000 + r.nextInt(50_000);
+            int port = TestPorts.getPort();
+            int proxyPort = TestPorts.getPort();
+            int gatewayPort = TestPorts.getPort();
+            int ipfsApiPort = TestPorts.getPort();
+            int ipfsGatewayPort = TestPorts.getPort();
+            int ipfsSwarmPort = TestPorts.getPort();
             return Args.parse(new String[]{
                     "-port", Integer.toString(port),
-                    "-allow-target", "/ip4/127.0.0.1/tcp/" + allowPort,
                     "-proxy-target", "/ip4/127.0.0.1/tcp/" + proxyPort,
                     "-gateway-port", Integer.toString(gatewayPort),
                     "-ipfs-api-address", "/ip4/127.0.0.1/tcp/" + ipfsApiPort,
                     "-ipfs-gateway-address", "/ip4/127.0.0.1/tcp/" + ipfsGatewayPort,
                     "-ipfs-swarm-port", Integer.toString(ipfsSwarmPort),
+                    "-ipfs.metrics.port", Integer.toString(TestPorts.getPort()),
                     "-admin-usernames", "peergos",
                     "-logToConsole", "true",
                     "-enable-gc", "true",
@@ -84,7 +91,7 @@ public abstract class UserTests {
                     Main.PEERGOS_PATH, peergosDir.toString(),
                     "peergos.password", "testpassword",
                     "pki.keygen.password", "testpkipassword",
-                    "pki.keyfile.password", "testpassword"
+                    "pki.keyfile.password", "testpassword",
             });
         } catch (IOException e) {
             throw new RuntimeException(e);
@@ -100,6 +107,10 @@ public abstract class UserTests {
             }
         }
         f.delete();
+    }
+
+    public void gc() {
+        service.gc.collect(e -> Futures.of(true));
     }
 
     protected String generateUsername() {
@@ -206,12 +217,16 @@ public abstract class UserTests {
         Assert.assertTrue("Second sign up fails", secondSignup.isCompletedExceptionally());
     }
 
+    public static CompletableFuture<MultiFactorAuthResponse> noMfa(MultiFactorAuthRequest req) {
+        throw new IllegalStateException("Unsupported!");
+    }
+
     @Test
     public void errorLoggingInToDeletedAccont() {
         String username = generateUsername();
         String password = "password";
         UserContext context = PeergosNetworkUtils.ensureSignedUp(username, password, network, crypto);
-        context.deleteAccount(password).join();
+        context.deleteAccount(password, UserTests::noMfa).join();
 
         try {
             PeergosNetworkUtils.ensureSignedUp(username, password, network, crypto);
@@ -226,7 +241,8 @@ public abstract class UserTests {
         String username = generateUsername();
         String password = "password";
         // set username claim to an expiry in the past
-        UserContext context = UserContext.signUpGeneral(username, password, "", LocalDate.now().minusDays(1),
+        UserContext context = UserContext.signUpGeneral(username, password, "", Optional.empty(), id -> {},
+                Optional.empty(), LocalDate.now().minusDays(1),
                 network, crypto, SecretGenerationAlgorithm.getDefault(crypto.random), t -> {}).join();
 
         LocalDate expiry = context.getUsernameClaimExpiry().join();
@@ -242,14 +258,15 @@ public abstract class UserTests {
     public void expiredSigninAfterPasswordChange() {
         String username = generateUsername();
         String password = "password";
-        UserContext context = UserContext.signUpGeneral(username, password, "", LocalDate.now().minusDays(2),
+        UserContext context = UserContext.signUpGeneral(username, password, "", Optional.empty(), id -> {},
+                Optional.empty(), LocalDate.now().minusDays(2),
                 network, crypto, SecretGenerationAlgorithm.getDefault(crypto.random), x -> {}).join();
         String newPassword = "G'day mate!";
 
         // change password and set username claim to an expiry in the past
         SecretGenerationAlgorithm alg = context.getKeyGenAlgorithm().join();
         SecretGenerationAlgorithm newAlg = SecretGenerationAlgorithm.withNewSalt(alg, crypto.random);
-        context = context.changePassword(password, newPassword, alg, newAlg, LocalDate.now().minusDays(1)).join();
+        context = context.changePassword(password, newPassword, alg, newAlg, LocalDate.now().minusDays(1), UserTests::noMfa).join();
 
         LocalDate expiry = context.getUsernameClaimExpiry().join();
         Assert.assertTrue(expiry.isBefore(LocalDate.now()));
@@ -267,9 +284,9 @@ public abstract class UserTests {
         String password1 = "pass1";
         String password2 = "pass2";
         UserContext context1 = PeergosNetworkUtils.ensureSignedUp(username, password1, network, crypto);
-        UserContext context2 = context1.changePassword(password1, password2).join();
+        UserContext context2 = context1.changePassword(password1, password2, UserTests::noMfa).join();
         try {
-            context2.changePassword(password2, password1).join();
+            context2.changePassword(password2, password1, UserTests::noMfa).join();
         } catch (Throwable t) {
             Assert.assertTrue(t.getMessage().contains("You must change to a different password."));
         }
@@ -303,6 +320,73 @@ public abstract class UserTests {
     }
 
     @Test
+    public void deleteWritableFolderWithSecretLinkToDescendant() {
+        String username = generateUsername();
+        String password = "password";
+        UserContext context = PeergosNetworkUtils.ensureSignedUp(username, password, network, crypto);
+        context.getUserRoot().join().mkdir("sync", network, false, context.mirrorBatId(), crypto).join();
+
+        LinkProperties syncLink = DirectorySync.init(context, username + "/sync");
+        // create a secret link to a subdir of sync, then delete sync dir
+        Path syncPath = PathUtil.get(username, "sync");
+        context.getByPath(syncPath).join().get()
+                .mkdir("subdir", network, false, context.mirrorBatId(), crypto).join();
+        LinkProperties subdirLink = context.createSecretLink(syncPath.resolve("subdir").toString(), false, Optional.empty(), Optional.empty(), "", false).join();
+
+        FileWrapper syncDir = context.getByPath(syncPath).join().get();
+        FileWrapper deleted = syncDir.remove(context.getUserRoot().join(), syncPath, context).join();
+
+        Map<Path, SharedWithState> sharedWith = context.sharedWithCache.getAllDescendantShares(syncPath, deleted.version).join();
+        Assert.assertTrue(sharedWith.isEmpty());
+
+        try {
+            // test that the secret link itself has been removed
+            EncryptedCapability ecap = network.dhtClient.getSecretLink(syncLink.toLink(context.signer.publicKeyHash)).join();
+        } catch (Exception e) {
+            if (!URLDecoder.decode(e.getMessage(), Charsets.UTF_8).contains("No secret link"))
+                throw new RuntimeException("Failed");
+        }
+
+        try {
+            // test that the secret link itself has been removed
+            EncryptedCapability ecap = network.dhtClient.getSecretLink(subdirLink.toLink(context.signer.publicKeyHash)).join();
+        } catch (Exception e) {
+            if (! URLDecoder.decode(e.getMessage(), Charsets.UTF_8).contains("No secret link"))
+                throw new RuntimeException("Failed");
+        }
+
+        // now try to init sync dir again
+        context.getUserRoot().join().mkdir("sync", network, false, context.mirrorBatId(), crypto).join();
+        DirectorySync.init(context, username + "/sync");
+    }
+
+    @Test
+    public void webdavHashesSet() {
+        String username = generateUsername();
+        String password = "password";
+        UserContext context = PeergosNetworkUtils.ensureSignedUp(username, password, network, crypto);
+        byte[] contents = new byte[0];
+        HashTreeBuilder hash = new HashTreeBuilder(0);
+        hash.setChunk(0, contents, context.crypto.hasher).join();
+        HashTree h = hash.complete(context.crypto.hasher).join();
+        String filename = "afile.bin";
+        context.getUserRoot().join()
+                .uploadFileWithHash(filename, AsyncReader.build(contents), 0, Optional.of(h), Optional.empty(), network, crypto, x -> {}).join();
+        FileWrapper emptyFile = context.getByPath(Paths.get(username, filename)).join().get();
+        HashBranch expected = emptyFile.getFileProperties().treeHash.get();
+        HashBranch empty = h.branch(0);
+        Assert.assertEquals(expected, empty);
+
+        byte[] data = new byte[1024];
+        context.getUserRoot().join().uploadOrReplaceFile(filename, AsyncReader.build(data), data.length, context.network, context.crypto, l -> {}).join();
+        FileWrapper updatedFile = context.getByPath(Paths.get(username, filename)).join().get();
+        HashBranch nonEmpty = updatedFile.getFileProperties().treeHash.get();
+        Assert.assertNotEquals(nonEmpty, empty);
+
+        Assert.assertTrue(updatedFile.getFileProperties().modified.isAfter(emptyFile.getFileProperties().modified));
+    }
+
+    @Test
     public void changePassword() throws Exception {
         String username = generateUsername();
         String password = "password";
@@ -311,7 +395,7 @@ public abstract class UserTests {
         PublicBoxingKey initialBoxer = keyPairs.right;
         PublicKeyHash initialIdentity = keyPairs.left;
         String newPassword = "newPassword";
-        UserContext updated = userContext.changePassword(password, newPassword).join();
+        UserContext updated = userContext.changePassword(password, newPassword, UserTests::noMfa).join();
         MultiUserTests.checkUserValidity(network, username);
 
         Pair<PublicKeyHash, PublicBoxingKey> updatedPairs = updated.getPublicKeys(username).join().get();
@@ -323,7 +407,7 @@ public abstract class UserTests {
 
         // change it again
         String password3 = "pass3";
-        changedPassword.changePassword(newPassword, password3).get();
+        changedPassword.changePassword(newPassword, password3, UserTests::noMfa).get();
         MultiUserTests.checkUserValidity(network, username);
         PeergosNetworkUtils.ensureSignedUp(username, password3, network, crypto);
     }
@@ -332,20 +416,21 @@ public abstract class UserTests {
     public void legacyLogin() throws Exception {
         String username = generateUsername();
         String password = "password";
-        UserContext userContext = UserContext.signUpGeneral(username, password, "", LocalDate.now().plusMonths(2),
+        UserContext userContext = UserContext.signUpGeneral(username, password, "", Optional.empty(), id -> {},
+                Optional.empty(), LocalDate.now().plusMonths(2),
                 network, crypto, SecretGenerationAlgorithm.getLegacy(crypto.random), x -> {}).join();
         SecretGenerationAlgorithm originalAlg = WriterData.fromCbor(UserContext.getWriterDataCbor(network, username).join().right).generationAlgorithm.get();
         Assert.assertTrue("legacy accounts generate boxer", originalAlg.generateBoxerAndIdentity());
         Pair<PublicKeyHash, PublicBoxingKey> keyPairs = userContext.getPublicKeys(username).join().get();
         PublicBoxingKey initialBoxer = keyPairs.right;
         PublicKeyHash initialIdentity = keyPairs.left;
-        WriterData initialWd = WriterData.getWriterData(initialIdentity, initialIdentity, network.mutable, network.dhtClient).join().props;
+        WriterData initialWd = WriterData.getWriterData(initialIdentity, initialIdentity, network.mutable, network.dhtClient).join().props.get();
         Assert.assertTrue(initialWd.staticData.isPresent());
 
         UserContext login = PeergosNetworkUtils.ensureSignedUp(username, password, network, crypto);
 
         String newPassword = "newPassword";
-        userContext.changePassword(password, newPassword).get();
+        userContext.changePassword(password, newPassword, UserTests::noMfa).get();
         MultiUserTests.checkUserValidity(network, username);
 
         UserContext changedPassword = PeergosNetworkUtils.ensureSignedUp(username, newPassword, network, crypto);
@@ -357,7 +442,7 @@ public abstract class UserTests {
 
         SecretGenerationAlgorithm alg = WriterData.fromCbor(UserContext.getWriterDataCbor(network, username).join().right).generationAlgorithm.get();
         Assert.assertTrue("password change upgrades legacy accounts", ! alg.generateBoxerAndIdentity());
-        WriterData finalWd = WriterData.getWriterData(newIdentity, newIdentity, network.mutable, network.dhtClient).join().props;
+        WriterData finalWd = WriterData.getWriterData(newIdentity, newIdentity, network.mutable, network.dhtClient).join().props.get();
         Assert.assertTrue(finalWd.staticData.isEmpty());
     }
 
@@ -367,7 +452,7 @@ public abstract class UserTests {
         String password = "password";
         UserContext userContext = PeergosNetworkUtils.ensureSignedUp(username, password, network, crypto);
         String newPassword = "passwordtest";
-        UserContext newContext = userContext.changePassword(password, newPassword).get();
+        UserContext newContext = userContext.changePassword(password, newPassword, UserTests::noMfa).get();
 
         try {
             UserContext oldContext = PeergosNetworkUtils.ensureSignedUp(username, password, network, crypto);
@@ -384,7 +469,7 @@ public abstract class UserTests {
         UserContext context = PeergosNetworkUtils.ensureSignedUp(username, password, network, crypto);
         SecretGenerationAlgorithm algo = context.getKeyGenAlgorithm().get();
         ScryptGenerator newAlgo = new ScryptGenerator(19, 8, 1, 64, algo.getExtraSalt());
-        context.changePassword(password, password, algo, newAlgo, LocalDate.now().plusMonths(2)).get();
+        context.changePassword(password, password, algo, newAlgo, LocalDate.now().plusMonths(2), UserTests::noMfa).get();
         PeergosNetworkUtils.ensureSignedUp(username, password, network, crypto);
     }
 
@@ -402,7 +487,7 @@ public abstract class UserTests {
         MaybeMultihash current = network.mutable.getPointerTarget(bContext.signer.publicKeyHash, bRoot.writer(), network.dhtClient).join().updated;
         PointerUpdate cas = new PointerUpdate(current, target, Optional.of(1000L));
         Assert.assertFalse(network.mutable.setPointer(bContext.signer.publicKeyHash, bRoot.writer(),
-                bRoot.signingPair().secret.signMessage(cas.serialize())).join());
+                bRoot.signingPair().secret.signMessage(cas.serialize()).join()).join());
         MaybeMultihash updated = network.mutable.getPointerTarget(bContext.signer.publicKeyHash, bRoot.writer(), network.dhtClient).join().updated;
         Assert.assertTrue("Malicious pointer update failed", updated.equals(current));
     }
@@ -432,6 +517,7 @@ public abstract class UserTests {
     public void concurrentFileModificationFailure() throws Exception {
         String username = generateUsername();
         String password = "test";
+        NetworkAccess network = this.network.clear();
         UserContext context = PeergosNetworkUtils.ensureSignedUp(username, password, network, crypto);
         FileWrapper userRoot = context.getUserRoot().get();
 
@@ -461,7 +547,7 @@ public abstract class UserTests {
                             1024, 1024 + section2.length, network, crypto, x -> {})).join();
             throw new RuntimeException("Concurrentmodification should have failed!");
         } catch (CompletionException c) {
-            if (!(c.getCause() instanceof MutableTree.CasException))
+            if (!(c.getCause() instanceof CasException))
                 throw new RuntimeException("Failure!");
         }
     }
@@ -567,7 +653,7 @@ public abstract class UserTests {
                         e.getValue()
                                 .stream()
                                 .map(f -> new FileWrapper.FileUploadProperties(f.getKey().get(f.getKey().size() - 1),
-                                        AsyncReader.build(f.getValue()), 0, f.getValue().length, false, false, x -> {}))
+                                        () -> AsyncReader.build(f.getValue()), 0, f.getValue().length, Optional.empty(), Optional.empty(), false, false, x -> {}))
                                 .collect(Collectors.toList())));
 
         int priorChildren = userRoot.getChildren(crypto.hasher, network).join().size();
@@ -593,7 +679,7 @@ public abstract class UserTests {
         UserContext context = PeergosNetworkUtils.ensureSignedUp(username, password, network, crypto);
 
         String filename = "somefile";
-        int size = 30 * 1024 * 1024;
+        int size = 50 * 1024 * 1024;
         byte[] data = new byte[size];
         random.nextBytes(data);
         AsyncReader thrower = new ThrowingStream(data, size / 2);
@@ -601,7 +687,7 @@ public abstract class UserTests {
         TransactionService txns = new NonClosingTransactionService(network, crypto, txnDir);
         String subdir = "dir";
         try {
-            FileWrapper.FileUploadProperties fileUpload = new FileWrapper.FileUploadProperties(filename, thrower, 0, size, false, false, x -> {
+            FileWrapper.FileUploadProperties fileUpload = new FileWrapper.FileUploadProperties(filename, () -> thrower, 0, size, Optional.empty(), Optional.empty(), false, false, x -> {
             });
             FileWrapper.FolderUploadProperties dirUploads = new FileWrapper.FolderUploadProperties(Arrays.asList(subdir), Arrays.asList(fileUpload));
             context.getUserRoot().join().uploadSubtree(Stream.of(dirUploads), context.mirrorBatId(), network, crypto, txns, f -> Futures.of(false), () -> true).join();
@@ -612,8 +698,8 @@ public abstract class UserTests {
         Assert.assertTrue(open.size() > 0);
         // Now try again, with confirmation from the user to resume upload
         FileWrapper parent = context.getByPath(Paths.get(username, subdir)).join().get();
-        parent.uploadFileJS(filename, AsyncReader.build(data), 0, size, false, context.mirrorBatId(), network, crypto, x -> {
-        }, txns, f -> Futures.of(true)).join();
+        parent.uploadFileJS(filename, AsyncReader.build(data), 0, size, false, context.mirrorBatId(),
+                network, crypto, x -> {}, context.getTransactionService(), f -> Futures.of(true)).join();
         checkFileContents(data, context.getByPath(Paths.get(username, subdir, filename)).join().get(), context);
     }
 
@@ -636,7 +722,7 @@ public abstract class UserTests {
             monitorVal[0] = val;
         };
         try {
-            FileWrapper.FileUploadProperties fileUpload = new FileWrapper.FileUploadProperties(filename, reader, 0, size, false, false, monitor);
+            FileWrapper.FileUploadProperties fileUpload = new FileWrapper.FileUploadProperties(filename, () -> reader, 0, size, Optional.empty(), Optional.empty(), false, false, monitor);
             FileWrapper.FolderUploadProperties dirUploads = new FileWrapper.FolderUploadProperties(Arrays.asList(subdir), Arrays.asList(fileUpload));
             context.getUserRoot().join().uploadSubtree(Stream.of(dirUploads), context.mirrorBatId(), network, crypto, txns, f -> Futures.of(false), () -> true).join();
         } catch (Exception e) {
@@ -658,7 +744,7 @@ public abstract class UserTests {
             monitor2Val[0] = val;
         };
         try {
-            FileWrapper.FileUploadProperties fileUpload = new FileWrapper.FileUploadProperties(filename, reader2, 0, size, false, true, monitor2);
+            FileWrapper.FileUploadProperties fileUpload = new FileWrapper.FileUploadProperties(filename, () -> reader2, 0, size, Optional.empty(), Optional.empty(), false, true, monitor2);
             FileWrapper.FolderUploadProperties dirUploads = new FileWrapper.FolderUploadProperties(Arrays.asList(subdir), Arrays.asList(fileUpload));
             context.getUserRoot().join().uploadSubtree(Stream.of(dirUploads), context.mirrorBatId(), network, crypto, txns2, f -> Futures.of(false), () -> true).join();
         } catch (Exception e) {
@@ -1081,6 +1167,7 @@ public abstract class UserTests {
         String username = generateUsername();
         String password = "test01";
         UserContext context = PeergosNetworkUtils.ensureSignedUp(username, password, network, crypto);
+        PublicKeyHash owner = context.signer.publicKeyHash;
         FileWrapper userRoot = context.getUserRoot().get();
 
         String filename = "mediumfile.bin";
@@ -1098,7 +1185,7 @@ public abstract class UserTests {
         List<Multihash> newFragmentCids = IntStream.range(0, rawBlockLinks.size()).mapToObj(i -> {
             Cid original = (Cid) rawBlockLinks.get(i);
             BatWithId bat = bats.get(i);
-            byte[] originalBlock = context.network.dhtClient.getRaw(original, Optional.of(bat)).join().get();
+            byte[] originalBlock = context.network.dhtClient.getRaw(owner, original, Optional.of(bat)).join().get();
             byte[] newBlock = Bat.removeRawBlockBatPrefix(originalBlock);
             return context.network.uploadFragments(Arrays.asList(new Fragment(newBlock)), userRoot.owner(),
                     userRoot.signingPair(), x -> {}, TransactionId.build("tid")).join().get(0);
@@ -1115,9 +1202,8 @@ public abstract class UserTests {
         modified.put("d", d);
         modified.remove("bats");
         CborObject.CborMap noBats = CborObject.CborMap.build(modified);
-        PublicKeyHash owner = file.owner();
         CommittedWriterData cwd = WriterData.getWriterData(owner, file.writer(), network.mutable, network.dhtClient).join();
-        WriterData wd = cwd.props;
+        WriterData wd = cwd.props.get();
         SigningPrivateKeyAndPublicHash signingPair = file.signingPair();
         Cid cryptreeCid = network.dhtClient.put(owner, signingPair, noBats.serialize(), crypto.hasher,
                 TransactionId.build("hey")).join();
@@ -1145,7 +1231,7 @@ public abstract class UserTests {
 
         // Check fragments are retrievable without a BAT
         Multihash originalFragmentWithoutBatPrefix = file.getPointer().fileAccess.toCbor().links().get(0);
-        CompletableFuture<Optional<byte[]>> originalRaw = network.clear().dhtClient.getRaw((Cid) originalFragmentWithoutBatPrefix, Optional.empty());
+        CompletableFuture<Optional<byte[]>> originalRaw = network.clear().dhtClient.getRaw(owner, (Cid) originalFragmentWithoutBatPrefix, Optional.empty());
         Assert.assertTrue(originalRaw.join().isPresent());
 
         //overwrite with 2 chunk file
@@ -1164,7 +1250,7 @@ public abstract class UserTests {
                 updatedFile.getFileProperties().streamSecret, newcap.getMapKey(), Optional.empty(), crypto.hasher).join();
         Assert.assertTrue(nextChunkRel.right.isEmpty());
         NetworkAccess cleared = network.clear();
-        WriterData uwd = WriterData.getWriterData(owner, updatedFile.writer(), network.mutable, network.dhtClient).join().props;
+        WriterData uwd = WriterData.getWriterData(owner, updatedFile.writer(), network.mutable, network.dhtClient).join().props.get();
         Optional<CryptreeNode> secondChunk = cleared.getMetadata(uwd, newcap.withMapKey(nextChunkRel.left, Optional.empty())).join();
         Assert.assertTrue(secondChunk.isPresent());
         // now the third chunk
@@ -1179,7 +1265,7 @@ public abstract class UserTests {
 
         // check retrieval of fragments fail without bat
         Multihash fragment = updatedFile.getPointer().fileAccess.toCbor().links().get(0);
-        Optional<byte[]> raw = network.clear().dhtClient.getRaw((Cid) fragment, Optional.empty()).exceptionally(e -> Optional.empty()).join();
+        Optional<byte[]> raw = network.clear().dhtClient.getRaw(owner, (Cid) fragment, Optional.empty()).exceptionally(e -> Optional.empty()).join();
         Assert.assertTrue(raw.isEmpty());
     }
 
@@ -1235,7 +1321,7 @@ public abstract class UserTests {
         Assert.assertTrue(badFileGet.exceptionally(t -> Optional.empty()).join().isEmpty());
 
         Multihash fragment = file.getPointer().fileAccess.toCbor().links().get(0);
-        CompletableFuture<Optional<byte[]>> raw = cleared.dhtClient.getRaw((Cid) fragment, Optional.empty());
+        CompletableFuture<Optional<byte[]>> raw = cleared.dhtClient.getRaw(context.signer.publicKeyHash, (Cid) fragment, Optional.empty());
         Assert.assertTrue(raw.exceptionally(t -> Optional.empty()).join().isEmpty());
     }
 
@@ -1261,7 +1347,7 @@ public abstract class UserTests {
         // check we can't get the third chunk any more
         WritableAbsoluteCapability pointer = original.writableFilePointer();
         CommittedWriterData cwd = network.synchronizer.getValue(pointer.owner, pointer.writer).join().get(pointer.writer);
-        Optional<CryptreeNode> thirdChunk = network.getMetadata(cwd.props, pointer.withMapKey(thirdChunkLabel.left, thirdChunkLabel.right)).join();
+        Optional<CryptreeNode> thirdChunk = network.getMetadata(cwd.props.get(), pointer.withMapKey(thirdChunkLabel.left, thirdChunkLabel.right)).join();
         Assert.assertTrue("File is truncated", ! thirdChunk.isPresent());
         Assert.assertTrue("File has correct size", truncated.getFileProperties().size == truncateLength);
 
@@ -1461,6 +1547,40 @@ public abstract class UserTests {
     }
 
     @Test
+    public void writableSecretLinkMoveTo() throws Exception {
+        String username = generateUsername();
+        String password = "test01";
+        UserContext context = PeergosNetworkUtils.ensureSignedUp(username, password, network, crypto);
+        FileWrapper userRoot = context.getUserRoot().get();
+
+        String filename = "mediumfile.bin";
+        byte[] data = new byte[128*1024];
+        random.nextBytes(data);
+        String dirName = "subdir";
+        userRoot.mkdir(dirName, context.network, false, userRoot.mirrorBatId(), context.crypto).get();
+        FileWrapper subdir = context.getByPath("/" + username + "/" + dirName).get().get();
+        String anotherDirName = "anotherDir";
+        subdir.mkdir(anotherDirName, context.network, false, userRoot.mirrorBatId(), context.crypto).get();
+        FileWrapper anotherDir = context.getByPath("/" + username + "/" + dirName + "/" + anotherDirName).get().get();
+        uploadFileSection(anotherDir, filename, new AsyncReader.ArrayBacked(data), 0, data.length, context.network,
+                context.crypto, l -> {}).get();
+
+        String path = "/" + username + "/" + dirName;
+        // move folder to new signing subspace
+        LinkProperties link = context.createSecretLink(path, true, Optional.empty(), Optional.empty(), "", false).join();
+
+        UserContext linkContext = UserContext.fromSecretLinkV2(link.toLinkString(context.signer.publicKeyHash), () -> Futures.of(""), network, crypto).get();
+        String entryPath = linkContext.getEntryPath().get();
+        Assert.assertTrue("public link to folder has correct entry path", entryPath.equals(path));
+
+        String filePath = "/" + username + "/" + dirName + "/" + anotherDirName + "/" + filename;
+        FileWrapper file = linkContext.getByPath(filePath).join().get();
+        FileWrapper target = linkContext.getByPath("/" + username + "/" + dirName).join().get();
+        FileWrapper parent = linkContext.getByPath("/" + username + "/" + dirName+ "/" + anotherDirName).join().get();
+        file.moveTo(target, parent, PathUtil.get(filePath), linkContext, () -> Futures.of(true)).join();
+    }
+
+    @Test
     public void recursiveDelete() {
         String username = generateUsername();
         String password = "test01";
@@ -1481,7 +1601,7 @@ public abstract class UserTests {
 
         AbsoluteCapability pointer = subfolder.getPointer().capability;
         CommittedWriterData cwd = network.synchronizer.getValue(pointer.owner, pointer.writer).join().get(pointer.writer);
-        Optional<CryptreeNode> subdir = network.getMetadata(cwd.props, pointer).join();
+        Optional<CryptreeNode> subdir = network.getMetadata(cwd.props.get(), pointer).join();
         Assert.assertTrue("Child deleted", ! subdir.isPresent());
     }
 
@@ -1766,6 +1886,51 @@ public abstract class UserTests {
     }
 
     @Test
+    public void bulkDeleteTest() {
+        CryptreeNode.setMaxChildLinkPerBlob(10);
+        String username = generateUsername();
+        String password = "test01";
+        UserContext context = PeergosNetworkUtils.ensureSignedUp(username, password, network.clear(), crypto);
+        FileWrapper userRoot = context.getUserRoot().join();
+
+        Set<String> filenames = new HashSet<>();
+
+        for (int i=0; i < 20; i++) {
+            String name = randomString();
+            byte[] data = randomData(8 * 1024);
+
+            AsyncReader fileData = new AsyncReader.ArrayBacked(data);
+            userRoot = userRoot.uploadOrReplaceFile(name, fileData, data.length,
+                    context.network, context.crypto, l -> {}).join();
+            filenames.add(name);
+        }
+
+        Set<FileWrapper> kids = userRoot.getChildren(crypto.hasher, context.network).join();
+        Set<String> kidNames = kids
+                .stream()
+                .map(f -> f.getName())
+                .collect(Collectors.toSet());
+
+        assertTrue("found uploaded files", kidNames.containsAll(filenames));
+
+        //delete the files
+        List<FileWrapper> toDelete = kids.stream()
+                .filter(f -> filenames.contains(f.getName()))
+                .collect(Collectors.toList());
+        FileWrapper deleted = FileWrapper.deleteChildren(userRoot, toDelete, PathUtil.get(username), context).join();
+
+        //re-create user-context
+        UserContext context2 = PeergosNetworkUtils.ensureSignedUp(username, password, network.clear(), crypto);
+        FileWrapper userRoot2 = context2.getUserRoot().join();
+
+        //check the files are no longer present
+        List<FileWrapper> remaining = userRoot2.getChildren(crypto.hasher, context2.network).join().stream()
+                .filter(f -> filenames.contains(f.getName()))
+                .collect(Collectors.toList());
+        Assert.assertTrue("uploaded files are deleted", remaining.isEmpty());
+    }
+
+    @Test
     public void internalCopy() {
         String username = generateUsername();
         String password = "test01";
@@ -1823,7 +1988,7 @@ public abstract class UserTests {
     public void usage() {
         String username = generateUsername();
         String password = "password";
-        Assert.assertTrue(network.instanceAdmin.acceptingSignups().join());
+        Assert.assertTrue(network.instanceAdmin.acceptingSignups().join().free);
         UserContext context = PeergosNetworkUtils.ensureSignedUp(username, password, network, crypto);
         long quota = context.getQuota().join();
         long usage = context.getSpaceUsage().join();
@@ -1835,7 +2000,7 @@ public abstract class UserTests {
         Assert.assertTrue("Non admins get an empty list", nonAdmin.join().isEmpty());
 
         // Now let's request some more quota and get it approved by an admin
-        context.requestSpace(quota * 2).join();
+        context.requestSpace(quota * 2, false).join();
 
         // retrieve, decode and approve request as admin
         UserContext admin = PeergosNetworkUtils.ensureSignedUp("peergos", "testpassword", network.clear(), crypto);
@@ -1849,20 +2014,21 @@ public abstract class UserTests {
     }
 
     @Test
-    public void correctUsageAndSpaceRecovery() {
+    public void correctUsageAndSpaceRecovery() throws Exception {
         String username = generateUsername();
         String password = "password";
         UserContext context = PeergosNetworkUtils.ensureSignedUp(username, password, network, crypto);
         long initialUsage = context.getSpaceUsage().join();
 
-        UserGC.checkRawUsage(context);
+        UserCleanup.checkRawUsage(context);
         String filename = "test.bin";
         context.getUserRoot().join().uploadFileJS(filename, AsyncReader.build(new byte[10*1024*1024]),
                 0, 10*1024*1024, true, context.mirrorBatId(), network, crypto, x-> {},
                 context.getTransactionService(), f -> Futures.of(true)).join();
         String dirName = "subdir";
         context.getUserRoot().join().mkdir(dirName, network, false, context.mirrorBatId(), crypto).join();
-        UserGC.checkRawUsage(context);
+        Thread.sleep(5_000); // Allow time for space usage recalculation
+        UserCleanup.checkRawUsage(context);
 
         // now delete the file and dir
         Path filePath = PathUtil.get(username, filename);
@@ -1870,7 +2036,7 @@ public abstract class UserTests {
         Path dirPath = PathUtil.get(username, dirName);
         context.getByPath(dirPath).join().get().remove(context.getUserRoot().join(), dirPath, context).join();
         try {Thread.sleep(2000);} catch (InterruptedException e) {}
-        UserGC.checkRawUsage(context);
+        UserCleanup.checkRawUsage(context);
 
         long finalUsage = context.getSpaceUsage().join();
         long diff = finalUsage - initialUsage;
@@ -1884,7 +2050,8 @@ public abstract class UserTests {
         UserContext context = PeergosNetworkUtils.ensureSignedUp(username, password, network, crypto);
 
         String serverMsgBody = "Welcome to the world of Peergos!";
-        service.serverMessages.addMessage(username, new ServerMessage(1, ServerMessage.Type.FromServer,
+        ServerMessageStore msgStore = (ServerMessageStore) service.serverMessages;
+        msgStore.addMessage(username, new ServerMessage(1, ServerMessage.Type.FromServer,
                 System.currentTimeMillis(), serverMsgBody, Optional.empty(), false));
 
         String replyBody = "Thanks for making Peergos awesome!";
@@ -1897,7 +2064,7 @@ public abstract class UserTests {
         List<ServerMessage> messages = context.getNewMessages().join();
         Assert.assertTrue(messages.size() == 0);
 
-        List<ServerMessage> onServer = service.serverMessages.getMessages(username);
+        List<ServerMessage> onServer = msgStore.getMessages(username);
         Assert.assertTrue(onServer.size() == 3);
         ServerMessage reply = onServer.get(2);
         Assert.assertTrue(reply.contents.equals(msgBody));
@@ -1905,7 +2072,7 @@ public abstract class UserTests {
         List<ServerConversation> convs = context.getServerConversations().join();
         Assert.assertTrue(convs.size() == 0);
 
-        service.serverMessages.addMessage(username, new ServerMessage(1, ServerMessage.Type.FromServer,
+        msgStore.addMessage(username, new ServerMessage(1, ServerMessage.Type.FromServer,
                 System.currentTimeMillis(), "Thank you for supporting Peergos.", Optional.empty(), false));
         context.dismissMessage(context.getNewMessages().join().get(0)).join();
         List<ServerMessage> updatedMessages = context.getNewMessages().join();

@@ -10,6 +10,7 @@ import java.nio.file.*;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.stream.*;
 
 /** The FileProperties class represents metadata for a file or directory
  *
@@ -20,7 +21,8 @@ import java.util.concurrent.*;
 public class FileProperties implements Cborable {
     public static final int MAX_FILE_NAME_SIZE = 255;
     public static final int MAX_PATH_SIZE = 4096;
-    public static final FileProperties EMPTY = new FileProperties("", true, false, "", 0, LocalDateTime.MIN, LocalDateTime.MIN, false, Optional.empty(), Optional.empty());
+    public static final FileProperties EMPTY = new FileProperties(".subsequent-dir-chunk", true, false, "", 0,
+            LocalDateTime.MIN, LocalDateTime.MIN, false, Optional.empty(), Optional.empty(), Optional.empty());
 
     public final String name;
     public final boolean isDirectory;
@@ -33,6 +35,7 @@ public class FileProperties implements Cborable {
     public final boolean isHidden;
     public final Optional<Thumbnail> thumbnail;
     public final Optional<byte[]> streamSecret;
+    public final Optional<HashBranch> treeHash;
 
     public FileProperties(String name,
                           boolean isDirectory,
@@ -43,11 +46,16 @@ public class FileProperties implements Cborable {
                           LocalDateTime created,
                           boolean isHidden,
                           Optional<Thumbnail> thumbnail,
-                          Optional<byte[]> streamSecret) {
+                          Optional<byte[]> streamSecret,
+                          Optional<HashBranch> treeHash) {
         if (name.length() > MAX_FILE_NAME_SIZE)
             throw new IllegalStateException("File and directory names must be less than 256 characters.");
         if (isDirectory && streamSecret.isPresent())
             throw new IllegalStateException("Directories cannot have stream secrets!");
+        if (name.contains("/"))
+            throw new IllegalStateException("Invalid character in filename!");
+        if (name.equals(".") || name.equals("..") || name.isEmpty())
+            throw new IllegalStateException("Invalid filename: " + name);
         this.name = name;
         this.isDirectory = isDirectory;
         this.isLink = isLink;
@@ -58,6 +66,7 @@ public class FileProperties implements Cborable {
         this.isHidden = isHidden;
         this.thumbnail = thumbnail;
         this.streamSecret = streamSecret;
+        this.treeHash = treeHash;
     }
 
     @JsIgnore
@@ -70,8 +79,10 @@ public class FileProperties implements Cborable {
                           LocalDateTime created,
                           boolean isHidden,
                           Optional<Thumbnail> thumbnail,
-                          Optional<byte[]> streamSecret) {
-        this(name, isDirectory, isLink, mimeType, (int)(size >> 32), (int) size, modified, created, isHidden, thumbnail, streamSecret);
+                          Optional<byte[]> streamSecret,
+                          Optional<HashBranch> treeHash) {
+        this(name, isDirectory, isLink, mimeType, (int)(size >> 32), (int) size, modified, created, isHidden, thumbnail,
+                streamSecret, treeHash);
     }
 
     /** Override this properties name with the link's name
@@ -80,7 +91,7 @@ public class FileProperties implements Cborable {
      * @return
      */
     public FileProperties withLink(FileProperties link) {
-        return new FileProperties(link.name, isDirectory, false, mimeType, size, modified, created, isHidden, thumbnail, streamSecret);
+        return new FileProperties(link.name, isDirectory, false, mimeType, size, modified, created, isHidden, thumbnail, streamSecret, treeHash);
     }
 
     public static void ensureValidParsedPath(Path path) {
@@ -104,6 +115,33 @@ public class FileProperties implements Cborable {
             counter.add(i);
         return Futures.reduceAll(counter, new Pair<>(firstMapKey, firstBat),
                 (current, i) -> calculateNextMapKey(streamSecret, current.left, current.right, h), (a, b) -> b);
+    }
+
+    private static <V> List<V> list(V elem) {
+        List<V> res = new ArrayList<>();
+        res.add(elem);
+        return res;
+    }
+
+    private static <V> List<V> add(List<V> start, V elem) { // needed for gwt
+        start.add(elem);
+        return start;
+    }
+    public static CompletableFuture<List<Pair<byte[], Optional<Bat>>>> calculateSubsequentMapKeys(byte[] streamSecret,
+                                                                                                  byte[] firstMapKey,
+                                                                                                  Optional<Bat> firstBat,
+                                                                                                  int nChunks,
+                                                                                                  Hasher h) {
+        List<Long> counter = new ArrayList<>();
+        for (long i=0; i < nChunks; i++)
+            counter.add(i);
+        List<Pair<byte[], Optional<Bat>>> first = list(new Pair<>(firstMapKey, firstBat));
+        return Futures.reduceAll(counter, first,
+                (current, i) -> calculateNextMapKey(streamSecret,
+                        current.get(current.size() - 1).left,
+                        current.get(current.size() - 1).right, h)
+                        .thenApply(next -> add(current, next)),
+        (a, b) -> Stream.concat(a.stream(), b.stream()).collect(Collectors.toList()));
     }
 
     public static CompletableFuture<Pair<byte[], Optional<Bat>>> calculateNextMapKey(byte[] streamSecret,
@@ -149,6 +187,7 @@ public class FileProperties implements Cborable {
         state.put("c", new CborObject.CborLong(created.toEpochSecond(ZoneOffset.UTC)));
         state.put("cn", new CborObject.CborLong(created.getNano()));
         state.put("h", new CborObject.CborBoolean(isHidden));
+        treeHash.ifPresent(b -> state.put("th", b.toCbor()));
         thumbnail.ifPresent(thumb -> state.put("i", new CborObject.CborByteArray(thumb.data)));
         thumbnail.ifPresent(thumb -> state.put("im", new CborObject.CborString(thumb.mimeType)));
         streamSecret.ifPresent(secret -> state.put("p", new CborObject.CborByteArray(secret)));
@@ -173,34 +212,40 @@ public class FileProperties implements Cborable {
         Optional<byte[]> thumbnailData = m.getOptionalByteArray("i");
         Optional<Thumbnail> thumbnail = thumbnailData.map(d -> new Thumbnail(m.getString("im", "image/png"), d));
         Optional<byte[]> streamSecret = m.getOptionalByteArray("p");
+        Optional<HashBranch> th = m.getOptional("th", HashBranch::fromCbor);
 
         LocalDateTime modified = LocalDateTime.ofEpochSecond(modifiedEpochSeconds, modifiedNano, ZoneOffset.UTC);
         LocalDateTime created = LocalDateTime.ofEpochSecond(createdEpochSeconds, createdNano, ZoneOffset.UTC);
-        return new FileProperties(name, isDirectory, isLink, mimeType, size, modified, created, isHidden, thumbnail, streamSecret);
+        return new FileProperties(name, isDirectory, isLink, mimeType, size, modified, created, isHidden, thumbnail,
+                streamSecret, th);
     }
 
     @JsIgnore
     public FileProperties withSize(long newSize) {
-        return new FileProperties(name, isDirectory, isLink, mimeType, newSize, modified, created, isHidden, thumbnail, streamSecret);
+        return new FileProperties(name, isDirectory, isLink, mimeType, newSize, modified, created, isHidden, thumbnail, streamSecret, Optional.empty());
+    }
+
+    public FileProperties withHash(Optional<HashBranch> treeHash) {
+        return new FileProperties(name, isDirectory, isLink, mimeType, size, modified, created, isHidden, thumbnail, streamSecret, treeHash);
     }
 
     public FileProperties withNoThumbnail() {
-        return new FileProperties(name, isDirectory, isLink, mimeType, size, modified, created, isHidden, Optional.empty(), streamSecret);
+        return new FileProperties(name, isDirectory, isLink, mimeType, size, modified, created, isHidden, Optional.empty(), streamSecret, treeHash);
     }
     public FileProperties withThumbnail(Optional<Thumbnail> newThumbnail) {
-        return new FileProperties(name, isDirectory, isLink, mimeType, size, modified, created, isHidden, newThumbnail, streamSecret);
+        return new FileProperties(name, isDirectory, isLink, mimeType, size, modified, created, isHidden, newThumbnail, streamSecret, treeHash);
     }
 
     public FileProperties withModified(LocalDateTime modified) {
-        return new FileProperties(name, isDirectory, isLink, mimeType, size, modified, created, isHidden, thumbnail, streamSecret);
+        return new FileProperties(name, isDirectory, isLink, mimeType, size, modified, created, isHidden, thumbnail, streamSecret, treeHash);
     }
 
     public FileProperties withNewStreamSecret(byte[] streamSecret) {
-        return new FileProperties(name, isDirectory, isLink, mimeType, size, modified, created, isHidden, thumbnail, Optional.of(streamSecret));
+        return new FileProperties(name, isDirectory, isLink, mimeType, size, modified, created, isHidden, thumbnail, Optional.of(streamSecret), treeHash);
     }
 
     public FileProperties asLink() {
-        return new FileProperties(name, isDirectory, true, mimeType, size, modified, created, isHidden, thumbnail, streamSecret);
+        return new FileProperties(name, isDirectory, true, mimeType, size, modified, created, isHidden, thumbnail, streamSecret, treeHash);
     }
 
     public String getType() {
@@ -222,6 +267,8 @@ public class FileProperties implements Cborable {
             return "pdf";
         if (mimeType.equals("application/zip"))
             return "zip";
+        if (mimeType.equals("application/json"))
+            return "text";
         if (mimeType.equals("application/java-archive"))
             return "java-archive";
 

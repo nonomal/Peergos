@@ -2,8 +2,8 @@ package peergos.shared.storage;
 
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.auth.*;
 import peergos.shared.util.*;
 
@@ -19,10 +19,10 @@ public class CachingVerifyingStorage extends DelegatingStorage {
     private final LRUCache<Multihash, CompletableFuture<Optional<CborObject>>> pending;
     private final LRUCache<Multihash, CompletableFuture<Optional<byte[]>>> pendingRaw;
     private final int maxValueSize, cacheSize;
-    private final Cid nodeId;
+    private final List<Cid> nodeIds;
     private final Hasher hasher;
 
-    public CachingVerifyingStorage(ContentAddressedStorage target, int maxValueSize, int cacheSize, Cid nodeId, Hasher hasher) {
+    public CachingVerifyingStorage(ContentAddressedStorage target, int maxValueSize, int cacheSize, List<Cid> nodeIds, Hasher hasher) {
         super(target);
         this.target = target;
         this.cache =  new LRUCache<>(cacheSize);
@@ -30,13 +30,18 @@ public class CachingVerifyingStorage extends DelegatingStorage {
         this.pendingRaw = new LRUCache<>(100);
         this.maxValueSize = maxValueSize;
         this.cacheSize = cacheSize;
-        this.nodeId = nodeId;
+        this.nodeIds = nodeIds;
         this.hasher = hasher;
     }
 
     @Override
     public CompletableFuture<Cid> id() {
-        return Futures.of(nodeId);
+        return Futures.of(nodeIds.get(nodeIds.size() - 1));
+    }
+
+    @Override
+    public CompletableFuture<List<Cid>> ids() {
+        return Futures.of(nodeIds);
     }
 
     private <T> CompletableFuture<T> verify(byte[] data, Multihash claimed, Supplier<T> result) {
@@ -68,7 +73,7 @@ public class CachingVerifyingStorage extends DelegatingStorage {
 
     @Override
     public ContentAddressedStorage directToOrigin() {
-        return new CachingVerifyingStorage(target.directToOrigin(), cacheSize, maxValueSize, nodeId, hasher);
+        return new CachingVerifyingStorage(target.directToOrigin(), cacheSize, maxValueSize, nodeIds, hasher);
     }
 
     @Override
@@ -84,8 +89,8 @@ public class CachingVerifyingStorage extends DelegatingStorage {
     }
 
     @Override
-    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat) {
-        return target.getChampLookup(owner, root, champKey, bat)
+    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat, Optional<Cid> committedRoot) {
+        return target.getChampLookup(owner, root, champKey, bat,committedRoot)
                 .thenCompose(blocks -> Futures.combineAllInOrder(blocks.stream()
                         .map(b -> hasher.hash(b, false)
                                 .thenApply(h -> cache(h, b)))
@@ -113,18 +118,20 @@ public class CachingVerifyingStorage extends DelegatingStorage {
     }
 
     @Override
-    public CompletableFuture<Optional<CborObject>> get(Cid key, Optional<BatWithId> bat) {
-        if (cache.containsKey(key))
-            return CompletableFuture.completedFuture(Optional.of(CborObject.fromByteArray(cache.get(key))));
+    public CompletableFuture<Optional<CborObject>> get(PublicKeyHash owner, Cid key, Optional<BatWithId> bat) {
+        byte[] cached = cache.get(key);
+        if (cached != null)
+            return CompletableFuture.completedFuture(Optional.of(CborObject.fromByteArray(cached)));
 
-        if (pending.containsKey(key))
-            return pending.get(key);
+        CompletableFuture<Optional<CborObject>> pend = pending.get(key);
+        if (pend != null)
+            return pend;
 
         CompletableFuture<Optional<CborObject>> pipe = new CompletableFuture<>();
         pending.put(key, pipe);
 
         CompletableFuture<Optional<CborObject>> result = new CompletableFuture<>();
-        target.get(key, bat)
+        target.get(owner, key, bat)
                 .thenCompose(cborOpt -> cborOpt.map(cbor -> verify(cbor.toByteArray(), key, () -> cbor)
                         .thenApply(Optional::of))
                         .orElseGet(() -> Futures.of(Optional.empty())))
@@ -167,20 +174,23 @@ public class CachingVerifyingStorage extends DelegatingStorage {
     }
 
     @Override
-    public CompletableFuture<Optional<byte[]>> getRaw(Cid key, Optional<BatWithId> bat) {
-        if (cache.containsKey(key))
-            return CompletableFuture.completedFuture(Optional.of(cache.get(key)));
+    public CompletableFuture<Optional<byte[]>> getRaw(PublicKeyHash owner, Cid key, Optional<BatWithId> bat) {
+        byte[] cached = cache.get(key);
+        if (cached != null)
+            return CompletableFuture.completedFuture(Optional.of(cached));
 
-        if (pendingRaw.containsKey(key))
-            return pendingRaw.get(key);
+        CompletableFuture<Optional<byte[]>> pend = pendingRaw.get(key);
+        if (pend != null)
+            return pend;
 
         CompletableFuture<Optional<byte[]>> pipe = new CompletableFuture<>();
         pendingRaw.put(key, pipe);
-        return target.getRaw(key, bat)
+        target.getRaw(owner, key, bat)
                 .thenCompose(arrOpt -> arrOpt.map(bytes -> verify(bytes, key, () -> bytes)
-                        .thenApply(Optional::of))
+                                .thenApply(Optional::of))
                         .orElseGet(() -> Futures.of(Optional.empty())))
                 .thenApply(rawOpt -> {
+                    rawOpt = rawOpt.filter(b -> b.length > 0);
                     if (rawOpt.isPresent()) {
                         byte[] value = rawOpt.get();
                         if (value.length > 0)
@@ -190,9 +200,10 @@ public class CachingVerifyingStorage extends DelegatingStorage {
                     pipe.complete(rawOpt);
                     return rawOpt;
                 }).exceptionally(t -> {
-                    pending.remove(key);
+                    pendingRaw.remove(key);
                     pipe.completeExceptionally(t);
-                    return Optional.empty();
+                    return null;
                 });
+        return pipe;
     }
 }

@@ -1,14 +1,13 @@
 package peergos.server;
 
 import com.zaxxer.hikari.*;
+import io.libp2p.core.*;
 import peergos.server.corenode.*;
 import peergos.server.crypto.*;
 import peergos.server.crypto.asymmetric.curve25519.*;
 import peergos.server.crypto.hash.*;
 import peergos.server.crypto.random.*;
-import peergos.server.crypto.symmetric.*;
 import peergos.server.login.*;
-import peergos.server.mutable.*;
 import peergos.server.space.*;
 import peergos.server.sql.*;
 import peergos.server.storage.*;
@@ -24,31 +23,26 @@ import peergos.shared.crypto.asymmetric.curve25519.*;
 import peergos.shared.crypto.hash.*;
 import peergos.shared.crypto.password.*;
 import peergos.shared.crypto.symmetric.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multiaddr.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.MultiAddress;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.mutable.*;
 import peergos.shared.storage.*;
 import peergos.shared.storage.auth.*;
 import peergos.shared.user.*;
 import peergos.shared.util.*;
 
+import java.io.*;
 import java.net.*;
 import java.nio.file.*;
 import java.sql.*;
+import java.sql.Connection;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.*;
+import java.util.stream.*;
 
 public class Builder {
-
-    public static Crypto initJavaCrypto() {
-        SafeRandomJava random = new SafeRandomJava();
-        Salsa20Poly1305Java symmetricProvider = new Salsa20Poly1305Java();
-        Ed25519Java signer = new Ed25519Java();
-        Curve25519 boxer = new Curve25519Java();
-        return Crypto.init(() -> new Crypto(random, new ScryptJava(), symmetricProvider, signer, boxer));
-    }
 
     public static Crypto initNativeCrypto(Salsa20Poly1305 symmetric, Ed25519 signer, Curve25519 boxer) {
         SafeRandomJava random = new SafeRandomJava();
@@ -58,14 +52,14 @@ public class Builder {
     public static Crypto initCrypto() {
         try {
             if (! "linux".equalsIgnoreCase(System.getProperty("os.name")))
-                return initJavaCrypto();
+                return JavaCrypto.init();
             JniTweetNacl nativeNacl = JniTweetNacl.build();
             Salsa20Poly1305 symmetricProvider = new JniTweetNacl.Symmetric(nativeNacl);
             Ed25519 signer = new JniTweetNacl.Signer(nativeNacl);
             Curve25519 boxer = new Curve25519Java();
             return initNativeCrypto(symmetricProvider, signer, boxer);
         } catch (Throwable t) {
-            return initJavaCrypto();
+            return JavaCrypto.init();
         }
     }
 
@@ -76,33 +70,36 @@ public class Builder {
         return getDBConnector(a, dbName);
     }
 
+    public static Supplier<Connection> getPostgresConnector(Args a, String prefix) {
+        String postgresHost = a.getArg(prefix + "postgres.host");
+        int postgresPort = a.getInt(prefix + "postgres.port", 5432);
+        String databaseName = a.getArg(prefix + "postgres.database", "peergos");
+        String postgresUsername = a.getArg(prefix + "postgres.username");
+        String postgresPassword = a.getArg(prefix + "postgres.password");
+
+        Properties props = new Properties();
+        props.setProperty("dataSourceClassName", "org.postgresql.ds.PGSimpleDataSource");
+        props.setProperty("dataSource.serverName", postgresHost);
+        props.setProperty("dataSource.portNumber", "" + postgresPort);
+        props.setProperty("dataSource.user", postgresUsername);
+        props.setProperty("dataSource.password", postgresPassword);
+        props.setProperty("dataSource.databaseName", databaseName);
+        HikariConfig config = new HikariConfig(props);
+        HikariDataSource ds = new HikariDataSource(config);
+
+        return () -> {
+            try {
+                return ds.getConnection();
+            } catch (SQLException e) {
+                throw new RuntimeException(e);
+            }
+        };
+    }
+
     public static Supplier<Connection> getDBConnector(Args a, String dbName) {
         boolean usePostgres = a.getBoolean("use-postgres", false);
-        HikariConfig config;
         if (usePostgres) {
-            String postgresHost = a.getArg("postgres.host");
-            int postgresPort = a.getInt("postgres.port", 5432);
-            String databaseName = a.getArg("postgres.database", "peergos");
-            String postgresUsername = a.getArg("postgres.username");
-            String postgresPassword = a.getArg("postgres.password");
-
-            Properties props = new Properties();
-            props.setProperty("dataSourceClassName", "org.postgresql.ds.PGSimpleDataSource");
-            props.setProperty("dataSource.serverName", postgresHost);
-            props.setProperty("dataSource.portNumber", "" + postgresPort);
-            props.setProperty("dataSource.user", postgresUsername);
-            props.setProperty("dataSource.password", postgresPassword);
-            props.setProperty("dataSource.databaseName", databaseName);
-            config = new HikariConfig(props);
-            HikariDataSource ds = new HikariDataSource(config);
-
-            return () -> {
-                try {
-                    return ds.getConnection();
-                } catch (SQLException e) {
-                    throw new RuntimeException(e);
-                }
-            };
+            return getPostgresConnector(a, "");
         } else {
             String sqlFilePath = Sqlite.getDbPath(a, dbName);
             if (":memory:".equals(sqlFilePath))
@@ -144,6 +141,36 @@ public class Builder {
         return new JavaPoster(ipfsGatewayAddress, false);
     }
 
+    /** A number representing the size in bytes of the blockstore's bloom filter. A value of zero represents the feature is disabled.
+
+     This site generates useful graphs for various bloom filter values: https://hur.st/bloomfilter/?n=1e6&p=0.01&m=&k=7
+     You may use it to find a preferred optimal value, where m is BloomFilterSize in bits. Remember to convert the value
+     m from bits, into bytes for use as BloomFilterSize in the config file. For example, for 1,000,000 blocks, expecting
+     a 1% false-positive rate, you'd end up with a filter size of 9592955 bits, so for BloomFilterSize we'd want to use
+     1199120 bytes. As of writing, 7 hash functions are used, so the constant k is 7 in the formula.
+     *
+     * @param falsePositivesProbability
+     * @param numberOfBlocks
+     * @return
+     */
+    public static int bloomfilterSizeBytes(double falsePositivesProbability, long numberOfBlocks) {
+        int numberOfHashfunctions = 7;
+        return (int)Math.ceil((numberOfBlocks * Math.log(falsePositivesProbability)) / Math.log(1 / Math.pow(2, Math.log(2))))/8;
+
+    }
+
+    /**
+     *
+     * @param a
+     * @return This returns the ipfs bloom  filter api target
+     */
+    public static JavaPoster buildBloomApiTarget(Args a) {
+        if (! a.hasArg("ipfs-bloom-api-address"))
+            return buildIpfsApi(a);
+        URL ipfsGatewayAddress = AddressUtil.getAddress(new MultiAddress(a.getArg("ipfs-bloom-api-address")));
+        return new JavaPoster(ipfsGatewayAddress, false);
+    }
+
     /**
      * Create path to local blockstore directory from Args.
      *
@@ -155,7 +182,7 @@ public class Builder {
     }
 
     private static BlockStoreProperties buildS3Properties(Args a) {
-        S3Config config = S3Config.build(a);
+        S3Config config = S3Config.build(a, Optional.empty());
         Optional<String> publicReadUrl = S3Config.getPublicReadUrl(a);
         boolean directWrites = a.getBoolean("direct-s3-writes", false);
         boolean publicReads = a.getBoolean("public-s3-reads", false);
@@ -164,105 +191,95 @@ public class Builder {
         return new BlockStoreProperties(directWrites, publicReads, authedReads, publicReadUrl, authedUrl);
     }
 
+    public static BlockMetadataStore buildBlockMetadata(Args a) {
+        try {
+            boolean usePostgres = a.getArg("block-metadata-db-type", "sqlite").equals("postgres");
+            if (usePostgres) {
+                return new JdbcBlockMetadataStore(getPostgresConnector(a, "metadb."), new PostgresCommands());
+            } else {
+                File metaFile = a.fromPeergosDir("block-metadata-sql-file", "blockmetadata-v3.sql").toFile();
+                Connection instance = new Sqlite.UncloseableConnection(Sqlite.build(metaFile.getPath()));
+                return new JdbcBlockMetadataStore(() -> instance, new SqliteCommands());
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     public static DeletableContentAddressedStorage buildLocalStorage(Args a,
+                                                                     BlockMetadataStore meta,
                                                                      TransactionStore transactions,
                                                                      BlockRequestAuthoriser authoriser,
-                                                                     Hasher hasher) {
+                                                                     ServerIdentityStore ids,
+                                                                     Hasher hasher) throws SQLException {
         boolean useIPFS = a.getBoolean("useIPFS");
         boolean enableGC = a.getBoolean("enable-gc", false);
         boolean useS3 = S3Config.useS3(a);
         JavaPoster ipfsApi = buildIpfsApi(a);
+        DeletableContentAddressedStorage.HTTP http = new DeletableContentAddressedStorage.HTTP(ipfsApi, false, hasher);
+        List<PeerId> ourIds = ids.getIdentities();
+        MultiIdStorage ipfs = new MultiIdStorage(http, ourIds);
+        String linkHost = a.getOptionalArg("public-domain").orElseGet(() -> "localhost:" + a.getInt("port"));
         if (useIPFS) {
-            DeletableContentAddressedStorage.HTTP ipfs = new DeletableContentAddressedStorage.HTTP(ipfsApi, false, hasher);
             if (useS3) {
                 // IPFS is already running separately, we can still use an S3BlockStorage
-                S3Config config = S3Config.build(a);
+                S3Config config = S3Config.build(a, Optional.empty());
                 BlockStoreProperties props = buildS3Properties(a);
-                TransactionalIpfs p2pBlockRetriever = new TransactionalIpfs(ipfs, transactions, authoriser, ipfs.id().join(), hasher);
+                TransactionalIpfs p2pBlockRetriever = new TransactionalIpfs(ipfs, transactions, authoriser, ipfs.id().join(), linkHost, hasher);
 
-                return new S3BlockStorage(config, ipfs.id().join(), props, transactions, authoriser, hasher, p2pBlockRetriever);
+                FileBlockCache cborCache = new FileBlockCache(a.fromPeergosDir("block-cache-dir", "block-cache"), 1024 * 1024 * 1024L);
+                FileBlockBuffer blockBuffer = new FileBlockBuffer(a.fromPeergosDir("s3-block-buffer-dir", "block-buffer"));
+                S3BlockStorage s3 = new S3BlockStorage(config, ipfs.ids().join(), props, linkHost, transactions, authoriser,
+                        meta, cborCache, blockBuffer, hasher, p2pBlockRetriever, ipfs);
+                s3.updateMetadataStoreIfEmpty();
+                return new LocalIpnsStorage(s3, ids);
             } else if (enableGC) {
-                return new TransactionalIpfs(ipfs, transactions, authoriser, ipfs.id().join(), hasher);
-            } else
-                return new AuthedStorage(ipfs, authoriser, hasher);
+                TransactionalIpfs txns = new TransactionalIpfs(ipfs, transactions, authoriser, ipfs.id().join(), linkHost, hasher);
+                MetadataCachingStorage metabs = new MetadataCachingStorage(txns, meta, hasher);
+                metabs.updateMetadataStoreIfEmpty();
+                return new LocalIpnsStorage(metabs, ids);
+            } else {
+                AuthedStorage target = new AuthedStorage(ipfs, authoriser, linkHost, hasher);
+                MetadataCachingStorage metabs = new MetadataCachingStorage(target, meta, hasher);
+                metabs.updateMetadataStoreIfEmpty();
+                return new LocalIpnsStorage(metabs, ids);
+            }
         } else {
             // In S3 mode of operation we require the ipfs id to be supplied as we don't have a local ipfs running
             if (useS3) {
                 if (enableGC)
                     throw new IllegalStateException("GC should be run separately when using S3!");
-                DeletableContentAddressedStorage.HTTP ipfs = new DeletableContentAddressedStorage.HTTP(ipfsApi, false, hasher);
-                Cid ourId = Cid.decode(a.getArg("ipfs.id"));
-                TransactionalIpfs p2pBlockRetriever = new TransactionalIpfs(ipfs, transactions, authoriser, ipfs.id().join(), hasher);
-                S3Config config = S3Config.build(a);
+                TransactionalIpfs p2pBlockRetriever = new TransactionalIpfs(http, transactions, authoriser, http.id().join(), linkHost, hasher);
+                S3Config config = S3Config.build(a, Optional.empty());
                 BlockStoreProperties props = buildS3Properties(a);
 
-                return new S3BlockStorage(config, ourId, props, transactions, authoriser, hasher, p2pBlockRetriever);
+                JavaPoster bloomApiTarget = buildBloomApiTarget(a);
+                DeletableContentAddressedStorage.HTTP bloomTarget = new DeletableContentAddressedStorage.HTTP(bloomApiTarget, false, hasher);
+
+                FileBlockCache cborCache = new FileBlockCache(a.fromPeergosDir("block-cache-dir", "block-cache"), 10 * 1024 * 1024 * 1024L);
+                FileBlockBuffer blockBuffer = new FileBlockBuffer(a.fromPeergosDir("s3-block-buffer-dir", "block-buffer"));
+                S3BlockStorage s3 = new S3BlockStorage(config, ipfs.ids().join(), props, linkHost, transactions, authoriser,
+                        meta, cborCache, blockBuffer, hasher, p2pBlockRetriever, bloomTarget);
+                s3.updateMetadataStoreIfEmpty();
+                return new LocalIpnsStorage(s3, ids);
             } else {
-                return new FileContentAddressedStorage(blockstorePath(a), transactions, authoriser, hasher);
+                FileContentAddressedStorage fileBacked = new FileContentAddressedStorage(blockstorePath(a), transactions, authoriser, hasher);
+                MetadataCachingStorage metabs = new MetadataCachingStorage(fileBacked, meta, hasher);
+                metabs.updateMetadataStoreIfEmpty();
+                return new LocalIpnsStorage(metabs, ids);
             }
         }
     }
 
-
-    private static CompletableFuture<Boolean> ALLOW = Futures.of(true);
-    private static CompletableFuture<Boolean> BLOCK = Futures.of(false);
     public static BlockRequestAuthoriser blockAuthoriser(Args a,
                                                          BatCave batStore,
                                                          Hasher hasher) {
         Optional<BatWithId> instanceBat = a.getOptionalArg("instance-bat").map(BatWithId::decode);
-        return (b, d, s, auth) -> {
-            Logging.LOG().fine("Allow: " + b + ", auth=" + auth + ", from: " + s);
-            if (b.isRaw()) {
-                List<BatId> batids = Bat.getRawBlockBats(d);
-                if (batids.isEmpty()) // legacy raw block
-                    return ALLOW;
-                if (auth.isEmpty())
-                    return BLOCK;
-                BlockAuth blockAuth = BlockAuth.fromString(auth);
-                for (BatId bid : batids) {
-                    Optional<Bat> bat = bid.getInline()
-                            .or(() -> bid.id.equals(blockAuth.batId) ?
-                                    batStore.getBat(bid) :
-                                    Optional.empty());
-                    if (bat.isPresent() && BlockRequestAuthoriser.isValidAuth(blockAuth, b, s, bat.get(), hasher))
-                        return ALLOW;
-                }
-                if (instanceBat.isPresent()) {
-                    if (BlockRequestAuthoriser.isValidAuth(blockAuth, b, s, instanceBat.get().bat, hasher))
-                        return ALLOW;
-                }
-                return BLOCK;
-            } else if (b.codec == Cid.Codec.DagCbor) {
-                CborObject block = CborObject.fromByteArray(d);
-                if (block instanceof CborObject.CborMap) {
-                    if (((CborObject.CborMap) block).containsKey("bats")) {
-                        List<BatId> batids = ((CborObject.CborMap) block).getList("bats", BatId::fromCbor);
-                        if (auth.isEmpty()) {
-                            System.out.println("INVALID AUTH: EMPTY");
-                            return BLOCK;
-                        }
-                        BlockAuth blockAuth = BlockAuth.fromString(auth);
-                        for (BatId bid : batids) {
-                            Optional<Bat> bat = bid.getInline()
-                                    .or(() -> bid.id.equals(blockAuth.batId) ?
-                                            batStore.getBat(bid) :
-                                            Optional.empty());
-                            if (bat.isPresent() && BlockRequestAuthoriser.isValidAuth(blockAuth, b, s, bat.get(), hasher))
-                                return ALLOW;
-                        }
-                        if (instanceBat.isPresent()) {
-                            if (BlockRequestAuthoriser.isValidAuth(blockAuth, b, s, instanceBat.get().bat, hasher))
-                                return ALLOW;
-                        }
-                        if (! batids.isEmpty()) {
-                            Logging.LOG().info("INVALID AUTH: " + BlockRequestAuthoriser.invalidReason(blockAuth, b, s, batids, hasher));
-                        }
-                        return BLOCK;
-                    } else return ALLOW; // This is a public block
-                } else // e.g. inner CHAMP nodes
-                    return ALLOW;
-            }
-            return BLOCK;
+        return (b, blockBats, s, auth) -> {
+            Optional<BlockAuth> blockAuth = auth.isEmpty() ?
+                    Optional.empty() :
+                    Optional.of(BlockAuth.fromString(auth));
+            return Futures.of(BlockRequestAuthoriser.allowRead(b, blockBats, s, blockAuth, batStore, instanceBat, hasher));
         };
     }
 
@@ -275,13 +292,18 @@ public class Builder {
         return JdbcTransactionStore.build(transactionsDb, getSqlCommands(a));
     }
 
+    public static boolean isPaidInstance(Args a) {
+        return a.hasArg("quota-admin-address");
+    }
+
     public static QuotaAdmin buildSpaceQuotas(Args a,
                                               DeletableContentAddressedStorage localDht,
                                               CoreNode core,
                                               Supplier<Connection> spaceDb,
-                                              Supplier<Connection> quotasDb) {
-        boolean paidStorage = a.hasArg("quota-admin-address");
-        if (paidStorage)
+                                              Supplier<Connection> quotasDb,
+                                              boolean isPki,
+                                              boolean localhostApi) {
+        if (isPaidInstance(a))
             return buildPaidQuotas(a);
 
         SqlSupplier sqlCommands = getSqlCommands(a);
@@ -293,9 +315,11 @@ public class Builder {
             quotaInit.forEach(quotas::setQuota);
         }
         long defaultQuota = a.getLong("default-quota");
-        long maxUsers = a.getLong("max-users");
+        long maxUsers = a.getLong("max-users", isPki ? 1 : 0);
+        if (! localhostApi && maxUsers > 0)
+            Logging.LOG().warning("Anyone can signup to this instance because we are listening on non-localhost addresses and max-users > 0. Using signup tokens is more secure.");
         Logging.LOG().info("Using default user space quota of " + defaultQuota);
-        return new UserQuotas(quotas, defaultQuota, maxUsers, spaceRequests, localDht, core);
+        return new UserQuotas(quotas, defaultQuota, maxUsers, spaceRequests, localDht, core, isPki);
     }
 
     public static QuotaAdmin buildPaidQuotas(Args a) {
@@ -303,7 +327,7 @@ public class Builder {
         return new HttpQuotaAdmin(poster);
     }
 
-    public static CoreNode buildPkiCorenode(MutablePointers mutable, Account account, BatCave batCave, ContentAddressedStorage dht, Args a) {
+    public static CoreNode buildPkiCorenode(MutablePointers mutable, Account account, BatCave batCave, DeletableContentAddressedStorage dht, Args a) {
         try {
             Crypto crypto = initCrypto();
             PublicKeyHash peergosIdentity = PublicKeyHash.fromString(a.getArg("peergos.identity.hash"));
@@ -324,21 +348,10 @@ public class Builder {
             SigningKeyPair pkiKeys = new SigningKeyPair(pkiPublic, pkiSecretKey);
             PublicKeyHash pkiPublicHash = ContentAddressedStorage.hashKey(pkiKeys.publicSigningKey);
 
-            PointerUpdate currentPkiPointer = mutable.getPointerTarget(peergosIdentity, pkiPublicHash, dht).join();
-            Optional<Long> currentPkiSequence = currentPkiPointer.sequence;
-            MaybeMultihash currentPkiRoot = currentPkiPointer.updated;
             SigningPrivateKeyAndPublicHash pkiSigner = new SigningPrivateKeyAndPublicHash(pkiPublicHash, pkiSecretKey);
-            if (! currentPkiRoot.isPresent()) {
-                CommittedWriterData committed = IpfsTransaction.call(peergosIdentity,
-                        tid -> WriterData.createEmpty(peergosIdentity, pkiSigner, dht, crypto.hasher, tid).join()
-                                .commit(peergosIdentity, pkiSigner, MaybeMultihash.empty(), Optional.empty(), mutable, dht, crypto.hasher, tid)
-                                .thenApply(version -> version.get(pkiSigner)), dht).join();
-                currentPkiRoot = committed.hash;
-                currentPkiSequence = committed.sequence;
-            }
 
-            return new IpfsCoreNode(pkiSigner, a.getInt("max-daily-signups"), currentPkiRoot, currentPkiSequence,
-                    dht, crypto.hasher, mutable, account, batCave, peergosIdentity);
+            return new IpfsCoreNode(pkiSigner, a.getInt("max-daily-signups"), dht, crypto, mutable,
+                    account, batCave, peergosIdentity);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -359,17 +372,18 @@ public class Builder {
                                          JdbcAccount rawAccount,
                                          BatCave bats,
                                          Account account,
-                                         Hasher hasher) {
+                                         LinkRetrievalCounter linkCounts,
+                                         Crypto crypto) {
         Multihash nodeId = localStorage.id().join();
         PublicKeyHash peergosId = PublicKeyHash.fromString(a.getArg("peergos.identity.hash"));
         Multihash pkiServerId = getPkiServerId(a);
         // build a mirroring proxying corenode, unless we are the pki node
-        boolean isPkiNode = nodeId.equals(pkiServerId);
+        boolean isPkiNode = nodeId.bareMultihash().equals(pkiServerId);
         return isPkiNode ?
                 buildPkiCorenode(localPointers, account, bats, localStorage, a) :
                 new MirrorCoreNode(new HTTPCoreNode(buildP2pHttpProxy(a), pkiServerId), rawAccount, bats, account, proxingMutable,
-                        localStorage, rawPointers, localPointers, transactions, localSocial, usageStore, peergosId,
-                        a.fromPeergosDir("pki-mirror-state-path","pki-state.cbor"), hasher);
+                        localStorage, rawPointers, localPointers, transactions, localSocial, usageStore, linkCounts, pkiServerId, peergosId,
+                        a.fromPeergosDir("pki-mirror-state-path","pki-state.cbor"), crypto);
     }
 
     public static JdbcIpnsAndSocial buildRawPointers(Args a, Supplier<Connection> dbConnectionPool) {
@@ -377,39 +391,41 @@ public class Builder {
     }
 
 
-    public static CompletableFuture<NetworkAccess> buildJavaNetworkAccess(URL apiAddress, URL proxyAddress, String pkiNodeId) {
+    public static CompletableFuture<NetworkAccess> buildJavaGatewayAccess(URL apiAddress, URL proxyAddress, String pkiNodeId) {
         Multihash pkiServerNodeId = Cid.decode(pkiNodeId);
         JavaPoster p2pPoster = new JavaPoster(proxyAddress, false);
         JavaPoster apiPoster = new JavaPoster(apiAddress, false);
         ScryptJava hasher = new ScryptJava();
-        return NetworkAccess.build(apiPoster, p2pPoster, pkiServerNodeId, NetworkAccess.buildLocalDht(apiPoster, true, hasher), hasher, false);
-    }
-
-    public static CompletableFuture<NetworkAccess> buildJavaNetworkAccess(URL target,
-                                                                          boolean isPublicServer) {
-        return buildJavaNetworkAccess(target, isPublicServer, Optional.empty());
+        return NetworkAccess.buildViaGateway(apiPoster, p2pPoster, pkiServerNodeId, 0, hasher, false);
     }
 
     public static CompletableFuture<NetworkAccess> buildJavaNetworkAccess(URL target,
                                                                           boolean isPublicServer,
-                                                                          Optional<String> basicAuth) {
-        return buildNonCachingJavaNetworkAccess(target, isPublicServer, basicAuth)
-                .thenApply(e -> e.withMutablePointerCache(7_000));
+                                                                          Optional<String> userAgent) {
+        return buildJavaNetworkAccess(target, isPublicServer, Optional.empty(), userAgent);
+    }
+
+    public static CompletableFuture<NetworkAccess> buildJavaNetworkAccess(URL target,
+                                                                          boolean isPublicServer,
+                                                                          Optional<String> basicAuth,
+                                                                          Optional<String> userAgent) {
+        return buildNonCachingJavaNetworkAccess(target, isPublicServer, 7_000, basicAuth, userAgent);
     }
 
     public static CompletableFuture<NetworkAccess> buildNonCachingJavaNetworkAccess(URL target,
                                                                                     boolean isPublicServer,
-                                                                                    Optional<String> basicAuth) {
-        JavaPoster poster = new JavaPoster(target, isPublicServer, basicAuth);
-        Multihash pkiNodeId = null; // This is not required when talking to a Peergos server
+                                                                                    int mutableCacheTime,
+                                                                                    Optional<String> basicAuth,
+                                                                                    Optional<String> userAgent) {
+        JavaPoster poster = new JavaPoster(target, isPublicServer, basicAuth, userAgent);
         ScryptJava hasher = new ScryptJava();
         ContentAddressedStorage localDht = NetworkAccess.buildLocalDht(poster, true, hasher);
-        return NetworkAccess.build(poster, poster, pkiNodeId, localDht, hasher, false);
+        return NetworkAccess.buildViaPeergosInstance(poster, poster, localDht, mutableCacheTime, hasher, false);
     }
 
     public static CompletableFuture<NetworkAccess> buildLocalJavaNetworkAccess(int targetPort) {
         try {
-            return buildJavaNetworkAccess(new URL("http://localhost:" + targetPort + "/"), false, Optional.empty());
+            return buildJavaNetworkAccess(new URL("http://localhost:" + targetPort + "/"), false, Optional.empty(), Optional.empty());
         } catch (MalformedURLException e) {
             throw new RuntimeException(e);
         }

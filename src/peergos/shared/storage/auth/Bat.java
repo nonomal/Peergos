@@ -3,8 +3,8 @@ package peergos.shared.storage.auth;
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.hash.*;
 import peergos.shared.crypto.random.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multibase.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.bases.*;
 import peergos.shared.util.*;
 
 import java.io.*;
@@ -75,7 +75,7 @@ public class Bat implements Cborable {
                                                      Hasher h) {
         if (batId.isIdentity())
             throw new IllegalStateException("Cannot use identity multihash in S3 signatures!");
-        S3Request req = new S3Request("GET", sourceNode.toBase58(), "api/v0/block/get?arg=" + block.toBase58(), S3Request.UNSIGNED,
+        S3Request req = new S3Request("GET", sourceNode.bareMultihash().toBase58(), "api/v0/block/get?arg=" + block.toBase58(), S3Request.UNSIGNED,
                 Optional.of(expirySeconds), false, true,
                 Collections.emptyMap(), Collections.emptyMap(), batId.toBase58(), "eu-central-1", datetime);
         return S3Request.computeSignature(req, encodeSecret(), h)
@@ -95,6 +95,10 @@ public class Bat implements Cborable {
         }
     }
 
+    public static List<BatId> getBlockBats(Cid h, byte[] data) {
+        return h.isRaw() ? getRawBlockBats(data) : getCborBlockBats(data);
+    }
+
     public static List<BatId> getRawBlockBats(byte[] block) {
         int magicLength = RAW_BLOCK_MAGIC_PREFIX.length;
         if (! ArrayOps.equalArrays(block, 0, magicLength, RAW_BLOCK_MAGIC_PREFIX, 0, magicLength))
@@ -102,6 +106,13 @@ public class Bat implements Cborable {
         ByteArrayInputStream bin = new ByteArrayInputStream(block);
         bin.skip(magicLength);
         return ((CborObject.CborList) CborObject.read(bin, block.length)).map(BatId::fromCbor);
+    }
+
+    public static List<BatId> getCborBlockBats(byte[] data) {
+        CborObject cbor = CborObject.fromByteArray(data);
+        if (! (cbor instanceof CborObject.CborMap))
+            return Collections.emptyList();
+        return ((CborObject.CborMap) cbor).getList("bats", BatId::fromCbor);
     }
 
     public static byte[] removeRawBlockBatPrefix(byte[] block) {

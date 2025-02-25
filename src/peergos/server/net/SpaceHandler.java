@@ -55,7 +55,8 @@ public class SpaceHandler implements HttpHandler {
                     break;
                 }
                 case "usage": {
-                    long usage = spaceUsage.getUsage(owner).join();
+                    byte[] signedTime = ArrayOps.hexToBytes(last.apply("auth"));
+                    long usage = spaceUsage.getUsage(owner, signedTime).join();
                     result = new CborObject.CborLong(usage);
                     break;
                 }
@@ -67,8 +68,7 @@ public class SpaceHandler implements HttpHandler {
                 }
                 case "request": {
                     byte[] signedReq = ArrayOps.hexToBytes(last.apply("req"));
-                    boolean res = spaceUsage.requestQuota(owner, signedReq).join();
-                    result = new CborObject.CborBoolean(res);
+                    result = spaceUsage.requestQuota(owner, signedReq,  0).join();
                     break;
                 }
                 default:

@@ -4,8 +4,8 @@ import com.sun.net.httpserver.*;
 import peergos.server.util.*;
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.*;
 import peergos.shared.storage.controller.*;
 import peergos.shared.util.*;
@@ -70,8 +70,7 @@ public class AdminHandler implements HttpHandler {
                     break;
                 }
                 case HttpInstanceAdmin.SIGNUPS: {
-                    boolean result = target.acceptingSignups().join();
-                    reply = new CborObject.CborBoolean(result);
+                    reply = target.acceptingSignups().join();
                     break;
                 }
                 default:

@@ -1,14 +1,15 @@
 package peergos.server.storage;
 
-import peergos.shared.*;
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.cid.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Cid;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.storage.*;
 import peergos.shared.storage.auth.*;
+import peergos.shared.user.fs.*;
 import peergos.shared.util.*;
 
+import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 
@@ -30,6 +31,16 @@ public class DelayingStorage implements ContentAddressedStorage {
     @Override
     public CompletableFuture<Cid> id() {
         return source.id();
+    }
+
+    @Override
+    public CompletableFuture<List<Cid>> ids() {
+        return source.ids();
+    }
+
+    @Override
+    public CompletableFuture<String> linkHost(PublicKeyHash owner) {
+        return source.linkHost(owner);
     }
 
     @Override
@@ -72,29 +83,44 @@ public class DelayingStorage implements ContentAddressedStorage {
     }
 
     @Override
-    public CompletableFuture<Optional<byte[]>> getRaw(Cid object, Optional<BatWithId> bat) {
+    public CompletableFuture<Optional<byte[]>> getRaw(PublicKeyHash owner, Cid object, Optional<BatWithId> bat) {
         try {
             sleep(readDelay);
-            return source.getRaw(object, bat);
+            return source.getRaw(owner, object, bat);
         } catch (Exception e) {
             throw new RuntimeException(e.getMessage(), e);
         }
     }
 
     @Override
-    public CompletableFuture<Optional<CborObject>> get(Cid hash, Optional<BatWithId> bat) {
+    public CompletableFuture<Optional<CborObject>> get(PublicKeyHash owner, Cid hash, Optional<BatWithId> bat) {
         try {
             sleep(readDelay);
-            return source.get(hash, bat);
+            return source.get(owner, hash, bat);
         } catch (Exception e) {
             throw new RuntimeException(e.getMessage(), e);
         }
     }
 
     @Override
-    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat) {
+    public CompletableFuture<List<byte[]>> getChampLookup(PublicKeyHash owner, Cid root, byte[] champKey, Optional<BatWithId> bat, Optional<Cid> committedRoot) {
         sleep(4*readDelay);
-        return source.getChampLookup(owner, root, champKey, bat);
+        return source.getChampLookup(owner, root, champKey, bat, committedRoot);
+    }
+
+    @Override
+    public CompletableFuture<EncryptedCapability> getSecretLink(SecretLink link) {
+        try {
+            sleep(4*readDelay);
+            return source.getSecretLink(link);
+        } catch (Exception e) {
+            throw new RuntimeException(e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public CompletableFuture<LinkCounts> getLinkCounts(String owner, LocalDateTime after, BatWithId mirrorBat) {
+        return source.getLinkCounts(owner, after, mirrorBat);
     }
 
     @Override
@@ -106,10 +132,8 @@ public class DelayingStorage implements ContentAddressedStorage {
         }
     }
 
-    public static NetworkAccess buildNetwork(NetworkAccess source, int readDelay, int writeDelay) {
-        ContentAddressedStorage delayingBlocks = new DelayingStorage(source.dhtClient, readDelay, writeDelay);
-        return new NetworkAccess(source.coreNode, source.account, source.social, delayingBlocks, source.batCave,
-                source.mutable, source.tree, source.synchronizer, source.instanceAdmin, source.spaceUsage,
-                source.serverMessager, source.hasher, source.usernames, false);
+    @Override
+    public CompletableFuture<IpnsEntry> getIpnsEntry(Multihash signer) {
+        throw new IllegalStateException("Unimplemented!");
     }
 }

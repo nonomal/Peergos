@@ -2,7 +2,8 @@ package peergos.server.space;
 
 import peergos.shared.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Multihash;
+import peergos.shared.util.*;
 
 import java.util.*;
 
@@ -12,6 +13,10 @@ public interface WriterUsageStore {
 
     Set<PublicKeyHash> getAllWriters();
 
+    Set<PublicKeyHash> getAllWriters(PublicKeyHash owner);
+
+    Set<PublicKeyHash> getAllWriters(String owner);
+
     WriterUsage getUsage(PublicKeyHash writer);
 
     void updateWriterUsage(PublicKeyHash writer,
@@ -20,5 +25,6 @@ public interface WriterUsageStore {
                            Set<PublicKeyHash> addedOwnedKeys,
                            long retainedStorage);
 
-    List<Multihash> getAllTargets();
+    // return current usage root, and username
+    List<Pair<Multihash, String>> getAllTargets();
 }

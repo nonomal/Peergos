@@ -2,23 +2,37 @@ package peergos.shared.corenode;
 
 import peergos.shared.crypto.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Multihash;
+import peergos.shared.storage.*;
 import peergos.shared.storage.auth.*;
 import peergos.shared.user.*;
 import peergos.shared.util.*;
 
 import java.io.*;
+import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 
 public interface CoreNode {
     int MAX_USERNAME_SIZE = 64;
 
+    default void initialize() {}
+
     CompletableFuture<Optional<RequiredDifficulty>> signup(String username,
                                                            UserPublicKeyLink chain,
                                                            OpLog setupOperations,
                                                            ProofOfWork proof,
                                                            String token);
+
+    CompletableFuture<Either<PaymentProperties, RequiredDifficulty>> startPaidSignup(String username,
+                                                                                     UserPublicKeyLink chain,
+                                                                                     ProofOfWork proof);
+
+    CompletableFuture<PaymentProperties> completePaidSignup(String username,
+                                                            UserPublicKeyLink chain,
+                                                            OpLog setupOperations,
+                                                            byte[] signedSpaceRequest,
+                                                            ProofOfWork proof);
 
     /**
      *
@@ -57,7 +71,11 @@ public interface CoreNode {
     CompletableFuture<UserSnapshot> migrateUser(String username,
                                                 List<UserPublicKeyLink> newChain,
                                                 Multihash currentStorageId,
-                                                Optional<BatWithId> mirrorBat);
+                                                Optional<BatWithId> mirrorBat,
+                                                LocalDateTime latestLinkCountUpdate,
+                                                long usage);
+
+    CompletableFuture<Optional<Multihash>> getNextServerId(Multihash serverId);
 
     /** This is only implemented by caching corenodes
      *
@@ -87,6 +105,14 @@ public interface CoreNode {
             else
                 return Optional.of(chain.get(chain.size() - 1).claim.storageProviders.get(0));
         });
+    }
+
+    default List<Multihash> getStorageProviders(PublicKeyHash owner) {
+        String username = getUsername(owner).join();
+        List<UserPublicKeyLink> chain = getChain(username).join();
+        if (chain.isEmpty())
+            return Collections.emptyList();
+        return chain.get(chain.size() - 1).claim.storageProviders;
     }
 
     void close() throws IOException;

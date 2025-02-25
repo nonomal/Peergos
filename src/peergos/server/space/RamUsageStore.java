@@ -4,7 +4,8 @@ import peergos.server.util.*;
 import peergos.shared.*;
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Multihash;
+import peergos.shared.util.*;
 
 import java.io.*;
 import java.nio.file.*;
@@ -41,6 +42,31 @@ public class RamUsageStore implements UsageStore {
     @Override
     public Set<PublicKeyHash> getAllWriters() {
         return state.currentView.keySet();
+    }
+
+    @Override
+    public Set<PublicKeyHash> getAllWriters(String owner) {
+        return state.currentView.entrySet()
+                .stream()
+                .filter(e -> e.getValue().owner.equals(owner))
+                .map(e -> e.getKey())
+                .collect(Collectors.toSet());
+    }
+
+    @Override
+    public Set<PublicKeyHash> getAllWriters(PublicKeyHash owner) {
+        Set<PublicKeyHash> res = new HashSet<>();
+        getAllWriters(owner, res);
+        return res;
+    }
+
+    private void getAllWriters(PublicKeyHash writer, Set<PublicKeyHash> res) {
+        res.add(writer);
+        WriterUsage current = state.currentView.get(writer);
+        for (PublicKeyHash ownedKey : current.ownedKeys()) {
+            if (! res.contains(ownedKey))
+                getAllWriters(ownedKey, res);
+        }
     }
 
     @Override
@@ -92,9 +118,12 @@ public class RamUsageStore implements UsageStore {
     }
 
     @Override
-    public List<Multihash> getAllTargets() {
+    public List<Pair<Multihash, String>> getAllTargets() {
         return state.currentView.values().stream()
-                .flatMap(wu -> wu.target().toOptional().stream())
+                .flatMap(wu -> wu.target()
+                        .toOptional()
+                        .map(h -> new Pair<>(h, wu.owner))
+                        .stream())
                 .collect(Collectors.toList());
     }
 

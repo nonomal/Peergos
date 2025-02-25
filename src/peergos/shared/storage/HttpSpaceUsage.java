@@ -2,7 +2,7 @@ package peergos.shared.storage;
 
 import peergos.shared.cbor.*;
 import peergos.shared.crypto.hash.*;
-import peergos.shared.io.ipfs.multihash.*;
+import peergos.shared.io.ipfs.Multihash;
 import peergos.shared.user.*;
 import peergos.shared.util.*;
 
@@ -12,8 +12,11 @@ import java.util.concurrent.*;
 import java.util.logging.*;
 
 public class HttpSpaceUsage implements SpaceUsageProxy {
+	private static final Logger LOG = Logger.getLogger(HttpSpaceUsage.class.getName());
+    public static void disableLog() {
+        LOG.setLevel(Level.OFF);
+    }
     private static final String P2P_PROXY_PROTOCOL = "/http";
-	private static final Logger LOG = Logger.getGlobal();
 
     private final HttpPoster direct, p2p;
 
@@ -29,17 +32,18 @@ public class HttpSpaceUsage implements SpaceUsageProxy {
     }
 
     @Override
-    public CompletableFuture<Long> getUsage(PublicKeyHash owner) {
-        return getUsage("", direct, owner);
+    public CompletableFuture<Long> getUsage(PublicKeyHash owner, byte[] signedTime) {
+        return getUsage("", direct, owner, signedTime);
     }
 
     @Override
-    public CompletableFuture<Long> getUsage(Multihash targetServerId, PublicKeyHash owner) {
-        return getUsage(getProxyUrlPrefix(targetServerId), p2p, owner);
+    public CompletableFuture<Long> getUsage(Multihash targetServerId, PublicKeyHash owner, byte[] signedTime) {
+        return getUsage(getProxyUrlPrefix(targetServerId), p2p, owner, signedTime);
     }
 
-    private CompletableFuture<Long> getUsage(String urlPrefix, HttpPoster poster, PublicKeyHash owner) {
-        return poster.get(urlPrefix + Constants.SPACE_USAGE_URL + "usage?owner=" + encode(owner.toString())).thenApply(res -> {
+    private CompletableFuture<Long> getUsage(String urlPrefix, HttpPoster poster, PublicKeyHash owner, byte[] signedTime) {
+        return poster.get(urlPrefix + Constants.SPACE_USAGE_URL + "usage?owner=" + encode(owner.toString())
+                + "&auth=" + ArrayOps.bytesToHex(signedTime)).thenApply(res -> {
             return ((CborObject.CborLong)CborObject.fromByteArray(res)).value;
         });
     }
@@ -81,19 +85,19 @@ public class HttpSpaceUsage implements SpaceUsageProxy {
     }
 
     @Override
-    public CompletableFuture<Boolean> requestQuota(PublicKeyHash owner, byte[] signedRequest) {
+    public CompletableFuture<PaymentProperties> requestQuota(PublicKeyHash owner, byte[] signedRequest, long usage) {
         return requestSpace("", direct, owner, signedRequest);
     }
 
     @Override
-    public CompletableFuture<Boolean> requestSpace(Multihash targetServerId, PublicKeyHash owner, byte[] signedRequest) {
+    public CompletableFuture<PaymentProperties> requestSpace(Multihash targetServerId, PublicKeyHash owner, byte[] signedRequest) {
         return requestSpace(getProxyUrlPrefix(targetServerId), p2p, owner, signedRequest);
     }
 
-    public CompletableFuture<Boolean> requestSpace(String urlPrefix, HttpPoster poster, PublicKeyHash owner, byte[] signedRequest) {
+    public CompletableFuture<PaymentProperties> requestSpace(String urlPrefix, HttpPoster poster, PublicKeyHash owner, byte[] signedRequest) {
         return poster.get(urlPrefix + Constants.SPACE_USAGE_URL + "request?owner=" + encode(owner.toString())
                 + "&req=" + ArrayOps.bytesToHex(signedRequest)).thenApply(res -> {
-            return ((CborObject.CborBoolean)CborObject.fromByteArray(res)).value;
+            return PaymentProperties.fromCbor(CborObject.fromByteArray(res));
         });
     }
 
